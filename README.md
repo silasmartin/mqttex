@@ -84,3 +84,7 @@ go run ./cmd/loadgen -topics 40000 -rate 20000   # broker on mqtt://127.0.0.1:18
 ```
 
 The frontend is plain JavaScript and CSS without a build step. `web/tree.js` holds the tree model and has no DOM dependency.
+
+## License
+
+[MIT](LICENSE)
