@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>mqttex</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f6fed'/%3E%3Cpath d='M4 11V5l4 4 4-4v6' fill='none' stroke='%23fff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <span class="brand">mqttex</span>
+
+    <div class="conn">
+      <label class="sr-only" for="profile">Connection profile</label>
+      <select id="profile"></select>
+      <button id="connect" class="btn primary" type="button">Connect</button>
+      <button id="edit" class="btn" type="button">Edit</button>
+      <button id="new" class="btn" type="button">New</button>
+    </div>
+
+    <span id="state" class="state" data-state="disconnected" role="status">disconnected</span>
+
+    <dl class="stats">
+      <div><dt>Topics</dt><dd id="stat-topics">0</dd></div>
+      <div><dt>Msg/s</dt><dd id="stat-rate">0</dd></div>
+      <div><dt>Messages</dt><dd id="stat-messages">0</dd></div>
+      <div><dt>Data</dt><dd id="stat-bytes">0 B</dd></div>
+    </dl>
+
+    <button id="clear" class="btn" type="button" title="Forget all topics received so far">Clear tree</button>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main class="split">
+    <section class="pane tree-pane" aria-label="Topics">
+      <div class="filter">
+        <label class="sr-only" for="filter">Filter topics</label>
+        <input id="filter" type="search" placeholder="Filter topics, e.g. a serial number   ( / )" autocomplete="off" spellcheck="false">
+        <span id="filter-count" class="muted"></span>
+      </div>
+      <div id="tree" class="tree" tabindex="0" role="tree" aria-label="Topic tree">
+        <div id="tree-spacer" class="tree-spacer"></div>
+        <div id="tree-empty" class="empty"></div>
+      </div>
+    </section>
+
+    <section class="pane detail-pane" aria-label="Selected topic">
+      <div id="detail-empty" class="empty">Select a topic to see its value and watch new messages arrive.</div>
+
+      <div id="detail" hidden>
+        <div class="topic-head">
+          <h1 id="d-topic" class="mono"></h1>
+          <button id="d-copy" class="btn small" type="button">Copy topic</button>
+        </div>
+
+        <dl class="facts">
+          <div><dt>Messages</dt><dd id="d-count">0</dd></div>
+          <div><dt>Last received</dt><dd id="d-last">-</dd></div>
+          <div><dt>Interval</dt><dd id="d-interval">-</dd></div>
+          <div><dt>Size</dt><dd id="d-size">-</dd></div>
+          <div><dt>QoS</dt><dd id="d-qos">-</dd></div>
+          <div><dt>Retained</dt><dd id="d-retain">-</dd></div>
+        </dl>
+
+        <div class="section-head">
+          <h2 id="d-value-title">Latest value</h2>
+          <button id="d-live" class="btn small" type="button" hidden>Back to live</button>
+          <button id="d-copy-value" class="btn small" type="button">Copy value</button>
+        </div>
+        <pre id="d-value" class="value mono" tabindex="0"></pre>
+        <p id="d-props" class="muted mono" hidden></p>
+
+        <div class="section-head">
+          <h2>History</h2>
+          <span class="muted">recorded while this topic is open, newest first</span>
+        </div>
+        <ol id="d-history" class="history mono"></ol>
+      </div>
+
+      <form id="publish" class="publish">
+        <h2>Publish</h2>
+        <label for="p-topic">Topic</label>
+        <input id="p-topic" class="mono" type="text" autocomplete="off" spellcheck="false" required>
+        <label for="p-payload">Payload</label>
+        <textarea id="p-payload" class="mono" rows="4" spellcheck="false"></textarea>
+        <div class="publish-row">
+          <label for="p-qos">QoS</label>
+          <select id="p-qos">
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+          <label class="check"><input id="p-retain" type="checkbox"> Retain</label>
+          <span class="grow"></span>
+          <button id="p-clear" class="btn danger" type="button" title="Publishes an empty retained message, which deletes the retained value on the broker">Clear retained</button>
+          <button class="btn primary" type="submit">Publish</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="profile-dialog">
+    <form id="profile-form" method="dialog">
+      <h2 id="pf-title">New connection</h2>
+      <div class="grid">
+        <label for="pf-name">Name</label>
+        <input id="pf-name" type="text" placeholder="defaults to the host">
+
+        <label for="pf-protocol">Protocol</label>
+        <select id="pf-protocol">
+          <option value="mqtt">mqtt://</option>
+          <option value="mqtts">mqtts:// (TLS)</option>
+          <option value="ws">ws://</option>
+          <option value="wss">wss:// (TLS)</option>
+        </select>
+
+        <label for="pf-host">Host</label>
+        <input id="pf-host" type="text" required spellcheck="false">
+
+        <label for="pf-port">Port</label>
+        <input id="pf-port" type="number" min="1" max="65535" required>
+
+        <label for="pf-path" data-ws>WebSocket path</label>
+        <input id="pf-path" type="text" placeholder="/mqtt" spellcheck="false" data-ws>
+
+        <label for="pf-username">Username</label>
+        <input id="pf-username" type="text" autocomplete="off" spellcheck="false">
+
+        <label for="pf-password">Password</label>
+        <input id="pf-password" type="password" autocomplete="new-password">
+
+        <label for="pf-clientid">Client ID</label>
+        <input id="pf-clientid" type="text" placeholder="random, so it never kicks out another client" spellcheck="false">
+
+        <label for="pf-subs">Subscriptions</label>
+        <div>
+          <textarea id="pf-subs" class="mono" rows="3" spellcheck="false" placeholder="#"></textarea>
+          <p class="hint">One topic filter per line. <code>#</code> matches all remaining levels, <code>+</code> exactly one level.</p>
+          <p id="pf-subs-warning" class="hint warn" hidden></p>
+        </div>
+
+        <span></span>
+        <label class="check" data-tls><input id="pf-insecure" type="checkbox"> Skip TLS certificate verification</label>
+      </div>
+      <p id="pf-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="pf-delete" class="btn danger" type="button">Delete</button>
+        <span class="grow"></span>
+        <button id="pf-cancel" class="btn" type="button">Cancel</button>
+        <button class="btn primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
