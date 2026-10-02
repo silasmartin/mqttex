@@ -1,9 +1,12 @@
-import { TopicTree } from './tree.js';
+import { TopicTree, filterPaste } from './tree.js';
+import { flatten, digest, columnLabels, buildRows, deviceTopics, pickTopic, rowLimit } from './compare.js';
+import { formatBytes, formatInterval } from './format.js';
 
 const ROW_H = 24;
 const OVERSCAN = 6;
 const ACTIVE_MS = 1500; // how long a row counts as "just received a message"
 const HISTORY_MAX = 500;
+const MAX_COMPARED = 32; // the server ignores ids beyond this
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,23 +20,6 @@ const compactFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFra
 const fullFmt = new Intl.NumberFormat('en');
 
 const compact = (n) => (n < 10_000 ? fullFmt.format(n) : compactFmt.format(n));
-
-function formatBytes(n) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`;
-}
-
-function formatInterval(ms) {
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`;
-  return `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min`;
-}
 
 // ---------------------------------------------------------------- state
 
@@ -52,6 +38,16 @@ let selectedId = -1;
 let history = []; // oldest first
 let pinnedN = null; // history entry shown instead of the latest one
 let shownN = null; // entry currently rendered in the value box
+
+// Compared topics are kept by name: ids are only valid within one epoch.
+const COMPARE_KEY = 'mqttex.compare';
+let compareNames = loadCompare();
+const compareValues = new Map(); // topic id -> latest message
+let compareIds = new Set(); // resolved ids of compareNames
+let resolvedKey = null; // compareIds as last resolved, to notice changes
+let sentCompareKey = ''; // ids the server streams, none while the table is hidden
+let compareDirty = true; // the table has to be updated
+let activeTab = 'topic';
 
 // ---------------------------------------------------------------- toasts
 
@@ -136,6 +132,12 @@ function resetClient() {
   rateSamples = [];
   cursor = null;
   lastWatchKey = '';
+  compareValues.clear();
+  compareIds = new Set();
+  resolvedKey = null;
+  sentCompareKey = ''; // the server dropped the list as well
+  headKey = null; // new rows, so values of the old epoch do not flash
+  compareDirty = true;
   deselect();
   scheduleRender();
 }
@@ -146,6 +148,21 @@ function onTick(t) {
     epoch = t.epoch;
   }
   if (t.names) tree.addTopics(t.first, t.names);
+  if (t.compare) {
+    for (const m of t.compare) {
+      if (!compareIds.has(m.id)) continue;
+      // Devices often send the same payload again. That only moves the age in
+      // the column header, which is read from compareValues every second.
+      const old = compareValues.get(m.id);
+      if (old && old.s === m.s && old.b === m.b && old.size === m.size && old.trunc === m.trunc) {
+        old.ts = m.ts;
+        continue;
+      }
+      compareValues.set(m.id, m);
+      compareDirty = true;
+    }
+  }
+  syncCompare();
   if (t.previews) for (const p of t.previews) previews.set(p.id, p);
   if (previews.size > 20_000) {
     previews.clear();
@@ -223,6 +240,7 @@ function scheduleRender() {
     renderQueued = false;
     renderTree();
     renderDetail();
+    renderCompare();
   });
 }
 
@@ -240,6 +258,9 @@ function makeRow() {
   el._chev = part('chev');
   el._dot = part('dot');
   el._name = part('name');
+  el._cmp = part('cmp-badge');
+  el._cmp.textContent = 'cmp';
+  el._cmp.title = 'In the comparison';
   el._val = part('val');
   el._meta = part('meta');
   spacer.append(el);
@@ -265,6 +286,7 @@ function fillRow(el, node, index, now) {
   setText(el._name, node.name === '' ? '(empty)' : node.name);
   el._name.classList.toggle('muted', node.name === '');
   el._dot.classList.toggle('on', now - node.active < ACTIVE_MS && node.active > 0);
+  el._cmp.hidden = !compareIds.has(node.id);
 
   let value = '';
   if (node.id >= 0) {
@@ -318,6 +340,7 @@ function renderTree() {
   }
 
   $('filter-count').textContent = tree.filtering ? `${fullFmt.format(tree.matches)} of ${fullFmt.format(tree.size)}` : '';
+  $('filter-compare').hidden = !(tree.filtering && tree.matches > 0);
   const empty = $('tree-empty');
   empty.hidden = rows.length > 0;
   if (rows.length === 0) empty.textContent = emptyTreeText();
@@ -347,6 +370,13 @@ treeEl.addEventListener('click', (ev) => {
 });
 
 treeEl.addEventListener('keydown', (ev) => {
+  if (ev.key === 'c' && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.target.matches('input, textarea, select')) {
+    if (cursor && cursor.id >= 0 && !ev.repeat) {
+      ev.preventDefault();
+      toggleCompare(tree.names[cursor.id]);
+    }
+    return;
+  }
   const rows = tree.rows();
   if (rows.length === 0) return;
   let i = cursor ? rows.indexOf(cursor) : -1;
@@ -391,13 +421,42 @@ treeEl.addEventListener('keydown', (ev) => {
 // ---------------------------------------------------------------- filter
 
 let filterTimer = null;
+function applyFilter() {
+  filterTimer = null;
+  tree.setFilter($('filter').value);
+  treeEl.scrollTop = 0;
+  scheduleRender();
+}
 $('filter').addEventListener('input', () => {
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => {
-    tree.setFilter($('filter').value);
-    treeEl.scrollTop = 0;
-    scheduleRender();
-  }, 100);
+  filterTimer = setTimeout(applyFilter, 100);
+});
+// A pasted column of serial numbers becomes a list of alternatives, see filterPaste.
+$('filter').addEventListener('paste', (ev) => {
+  const input = ev.target;
+  const list = filterPaste(ev.clipboardData?.getData('text') ?? '', input.value.slice(0, input.selectionStart), input.value.slice(input.selectionEnd));
+  if (list === null) return;
+  ev.preventDefault();
+  input.setRangeText(list, input.selectionStart, input.selectionEnd, 'end');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+});
+$('filter-compare').addEventListener('click', () => {
+  // The filter is applied after a short delay; make sure the matches are current.
+  if (filterTimer !== null) {
+    clearTimeout(filterTimer);
+    applyFilter();
+  }
+  const missing = tree.matchingIds().map((id) => tree.names[id]).filter((name) => !compareNames.includes(name));
+  const added = missing.slice(0, Math.max(0, MAX_COMPARED - compareNames.length));
+  if (added.length > 0) setCompare([...compareNames, ...added]);
+  if (added.length < missing.length) {
+    toast('error', `Added ${added.length} of ${missing.length} matches; the comparison holds at most ${MAX_COMPARED} topics.`);
+  } else if (added.length === 0) {
+    toast('ok', 'All matches are already in the comparison.');
+  } else {
+    toast('ok', `Added ${added.length} ${added.length === 1 ? 'topic' : 'topics'} to the comparison.`);
+  }
+  showTab('compare');
 });
 $('filter').addEventListener('keydown', (ev) => {
   if (ev.key === 'ArrowDown') {
@@ -428,6 +487,7 @@ function select(id) {
   $('detail-empty').hidden = true;
   $('d-topic').textContent = tree.names[id];
   $('p-topic').value = tree.names[id];
+  updateCompareButton();
   send({ t: 'select', epoch, id });
 }
 
@@ -555,7 +615,343 @@ async function copy(text, what) {
   }
 }
 $('d-copy').addEventListener('click', () => copy($('d-topic').textContent, 'topic'));
+$('d-compare').addEventListener('click', () => {
+  if (selectedId >= 0) toggleCompare(tree.names[selectedId]);
+});
 $('d-copy-value').addEventListener('click', () => copy($('d-value').textContent, 'value'));
+
+// ---------------------------------------------------------------- compare
+
+function loadCompare() {
+  try {
+    const list = JSON.parse(localStorage.getItem(COMPARE_KEY) ?? '[]');
+    if (Array.isArray(list)) return list.filter((n) => typeof n === 'string').slice(0, MAX_COMPARED);
+  } catch {
+    // private window, blocked storage or a broken entry: start empty
+  }
+  return [];
+}
+
+function saveCompare() {
+  try {
+    localStorage.setItem(COMPARE_KEY, JSON.stringify(compareNames));
+  } catch {
+    // only a convenience, like the last profile
+  }
+}
+
+// Resolves the names to ids whenever that can change: after edits, after a
+// reset and when the names of stored topics arrive. Names the server has not
+// delivered yet stay out until they show up in tick.names. Payloads are only
+// streamed while the table is on screen; the tree badge and the tab title
+// need the names alone.
+function syncCompare() {
+  if (epoch === 0) return;
+  const ids = [];
+  for (const name of compareNames) {
+    const id = tree.idOf(name);
+    if (id >= 0 && ids.length < MAX_COMPARED) ids.push(id);
+  }
+  const key = ids.join();
+  if (key !== resolvedKey) {
+    resolvedKey = key;
+    compareIds = new Set(ids);
+    for (const id of compareValues.keys()) if (!compareIds.has(id)) compareValues.delete(id);
+    compareDirty = true;
+  }
+  const streamed = activeTab === 'compare' ? ids : [];
+  if (streamed.join() === sentCompareKey) return;
+  sentCompareKey = streamed.join();
+  send({ t: 'compare', epoch, ids: streamed });
+}
+
+function setCompare(names) {
+  compareNames = names;
+  saveCompare();
+  compareDirty = true;
+  syncCompare();
+  updateCompareButton();
+  scheduleRender();
+}
+
+function toggleCompare(name) {
+  if (compareNames.includes(name)) {
+    setCompare(compareNames.filter((n) => n !== name));
+    return;
+  }
+  if (compareNames.length >= MAX_COMPARED) {
+    toast('error', `Could not add ${name}: at most ${MAX_COMPARED} topics can be compared.`);
+    return;
+  }
+  setCompare([...compareNames, name]);
+}
+
+function updateCompareButton() {
+  if (selectedId < 0) return;
+  const inList = compareNames.includes(tree.names[selectedId]);
+  $('d-compare').textContent = inList ? '− Compare' : '+ Compare';
+  $('d-compare').title = inList ? 'Remove this topic from the comparison ( c )' : 'Add this topic to the comparison ( c )';
+}
+
+function showTab(tab) {
+  if (tab === activeTab) return;
+  activeTab = tab;
+  $('tab-topic').setAttribute('aria-selected', String(tab === 'topic'));
+  $('tab-compare').setAttribute('aria-selected', String(tab === 'compare'));
+  $('panel-topic').hidden = tab !== 'topic';
+  $('panel-compare').hidden = tab !== 'compare';
+  // Values that changed while the table was hidden arrive right after the
+  // switch; they should not all flash at once.
+  quietUntil = performance.now() + 1000;
+  compareDirty = true;
+  syncCompare();
+  scheduleRender();
+}
+$('tab-topic').addEventListener('click', () => showTab('topic'));
+$('tab-compare').addEventListener('click', () => showTab('compare'));
+
+const flatCache = new WeakMap(); // message -> fields, so a payload is parsed once
+let headKey = null; // compareNames the header row was built for
+let rowEls = new Map(); // field path -> { tr, cells }, kept while the columns stay
+let ageCells = [];
+let quietUntil = 0; // changed cells do not flash before this time, see showTab
+const emptyRow = document.createElement('tr');
+const emptyCell = emptyRow.appendChild(document.createElement('td'));
+emptyCell.className = 'missing';
+const cutRow = document.createElement('tr'); // says how many rows rowLimit left out
+const cutCell = cutRow.appendChild(document.createElement('td'));
+cutCell.className = 'missing';
+
+function fieldsOf(m) {
+  let f = flatCache.get(m);
+  if (!f) {
+    let text = m.s;
+    if (m.size === 0) text = '(empty payload)';
+    // Binary payloads are only told apart, like the tree only names their size.
+    else if (text === undefined) text = `binary, ${formatBytes(m.size)}, #${digest(m.b ?? '')}`;
+    f = flatten(text, m.trunc);
+    flatCache.set(m, f);
+  }
+  return f;
+}
+
+function ageText(name, now) {
+  const id = tree.idOf(name);
+  if (id < 0) return 'not seen yet';
+  const m = compareValues.get(id);
+  if (!m) return 'waiting for data';
+  const ms = Math.max(0, now - m.ts);
+  if (ms < 1000) return 'just now';
+  if (ms < 60_000) return `${Math.floor(ms / 1000)} s ago`;
+  return `${formatInterval(ms)} ago`;
+}
+
+function renderCompare() {
+  setText($('tab-compare'), `Compare (${compareNames.length})`);
+  if (activeTab !== 'compare') return;
+  const empty = compareNames.length === 0;
+  $('c-empty').hidden = !empty;
+  $('c-wrap').hidden = empty;
+  // Only new payloads, a changed column list or the filter mark the table
+  // dirty, and then only the cells that changed are touched. The ages
+  // refresh every second.
+  if (compareDirty) {
+    compareDirty = false;
+    updateCompareTable();
+  }
+  const now = Date.now();
+  for (const { el, name } of ageCells) setText(el, ageText(name, now));
+}
+
+function element(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+// The header changes only with the column list, so its buttons stay put
+// while values stream in.
+function buildCompareHead() {
+  const labels = columnLabels(compareNames);
+  ageCells = [];
+  const head = element('tr');
+  head.append(element('th', '', 'Field'));
+  compareNames.forEach((name, i) => {
+    const th = element('th');
+    th.title = name;
+    const top = element('div', 'c-col');
+    const remove = element('button', 'c-remove', '×');
+    remove.type = 'button';
+    remove.dataset.name = name;
+    remove.title = 'Remove from the comparison';
+    remove.setAttribute('aria-label', `Remove ${name} from the comparison`);
+    top.append(element('span', 'c-label', labels[i]), remove);
+    const age = element('span', 'c-age');
+    ageCells.push({ el: age, name });
+    th.append(top, age);
+    head.append(th);
+  });
+  return head;
+}
+
+function newCompareRow(path) {
+  const tr = element('tr');
+  const th = element('th', '', path);
+  th.scope = 'row';
+  tr.append(th);
+  const cells = compareNames.map(() => {
+    const td = element('td');
+    td._v = null; // nothing shown yet
+    tr.append(td);
+    return td;
+  });
+  return { tr, cells };
+}
+
+// Returns true when the cell showed another value before, which makes it flash.
+function fillCell(td, v) {
+  if (td._v === v) return false;
+  const changed = typeof td._v === 'string' && v !== undefined;
+  td._v = v;
+  td.textContent = v ?? '-';
+  td.classList.toggle('missing', v === undefined);
+  return changed;
+}
+
+function updateCompareTable() {
+  const table = $('c-table');
+  const body = table.tBodies[0];
+  // Topic names may contain any character, a newline included.
+  const key = JSON.stringify(compareNames);
+  if (key !== headKey) {
+    headKey = key;
+    rowEls = new Map();
+    table.tHead.replaceChildren(buildCompareHead());
+    body.replaceChildren();
+    emptyCell.colSpan = compareNames.length + 1;
+    cutCell.colSpan = compareNames.length + 1;
+  }
+
+  const columns = compareNames.map((name) => {
+    const m = compareValues.get(tree.idOf(name));
+    return m ? fieldsOf(m) : null;
+  });
+  const rows = buildRows(columns);
+  // A field that comes back later gets a new row, which does not flash.
+  const live = new Set(rows.map((r) => r.path));
+  for (const path of rowEls.keys()) if (!live.has(path)) rowEls.delete(path);
+  const onlyDiffs = $('c-diff').checked;
+
+  // Rows that are not shown (by "Only differences" or beyond the row limit)
+  // but exist from before are filled as well, so they do not flash with old
+  // changes when they are shown again. Others are created once they are.
+  const flash = performance.now() >= quietUntil;
+  const limit = rowLimit(compareNames.length);
+  const changed = [];
+  const trs = [];
+  let cut = 0;
+  for (const row of rows) {
+    const wanted = row.differs || !onlyDiffs;
+    const shown = wanted && trs.length < limit;
+    if (wanted && !shown) cut++;
+    let r = rowEls.get(row.path);
+    if (!r) {
+      if (!shown) continue;
+      r = newCompareRow(row.path);
+      rowEls.set(row.path, r);
+    }
+    r.tr.classList.toggle('differs', row.differs);
+    row.values.forEach((v, i) => {
+      if (fillCell(r.cells[i], v) && flash && shown) changed.push(r.cells[i]);
+    });
+    if (shown) trs.push(r.tr);
+  }
+  if (trs.length === 0) {
+    emptyCell.textContent = columns.some(Boolean) && onlyDiffs ? 'No differences.' : 'Waiting for messages on these topics.';
+    trs.push(emptyRow);
+  }
+  if (cut > 0) {
+    const fields = `${fullFmt.format(cut)} more ${cut === 1 ? 'field is' : 'fields are'} not shown`;
+    cutCell.textContent = onlyDiffs ? `${fields}. Compare fewer topics to see them.` : `${fields}. Turn on Only differences or compare fewer topics to see them.`;
+    trs.push(cutRow);
+  }
+
+  // Rows that stay are not moved, so a text selection in them survives.
+  const keep = new Set(trs);
+  for (const tr of [...body.rows]) {
+    if (keep.has(tr)) continue;
+    tr.remove();
+    // A removed row no longer reports the end of its animations to the
+    // table, so a flash still running would start over once it is back.
+    for (const td of tr.cells) td.classList.remove('flash');
+  }
+  let at = body.firstChild;
+  for (const tr of trs) {
+    if (tr === at) at = at.nextSibling;
+    else body.insertBefore(tr, at);
+  }
+
+  if (changed.length > 0) {
+    for (const td of changed) td.classList.remove('flash');
+    void body.offsetWidth; // restarts the animation in cells that are still flashing
+    for (const td of changed) td.classList.add('flash');
+  }
+}
+
+$('c-table').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.c-remove');
+  if (btn) setCompare(compareNames.filter((n) => n !== btn.dataset.name));
+});
+// A flashed cell would flash again whenever its row is put back into the table.
+$('c-table').addEventListener('animationend', (ev) => ev.target.classList.remove('flash'));
+
+$('c-diff').addEventListener('change', () => {
+  compareDirty = true;
+  scheduleRender();
+});
+
+confirmClick($('c-clear'), () => setCompare([]));
+
+$('c-add').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const value = $('c-device').value.trim();
+  if (!value) return;
+  const full = value.includes('/');
+  if (!full && compareNames.length === 0) {
+    toast('error', 'Could not add the device: add a first topic with + Compare or c in the tree, or enter a full topic.');
+    return;
+  }
+  const guesses = deviceTopics(compareNames, value);
+  if (guesses.length === 0) {
+    toast('error', `Could not tell which part of the compared topics is the device ${value}. Enter the full topic instead.`);
+    return;
+  }
+  // Several segments can pass for the device; the topic the broker has
+  // decides. Topic names are case-sensitive and typed serial numbers often
+  // are not, so a topic that only differs in case is the second choice.
+  const exact = (n) => (tree.idOf(n) >= 0 ? n : undefined);
+  const loose = (n) => {
+    const id = tree.idOfIgnoringCase(n);
+    return id >= 0 ? tree.names[id] : undefined;
+  };
+  const name = pickTopic(guesses, [exact, loose], compareNames);
+  if (compareNames.includes(name)) {
+    toast('error', `${name} is already in the comparison.`);
+    return;
+  }
+  if (tree.idOf(name) < 0) {
+    if (full) toast('error', `Could not add ${name}: no message was received on this topic so far.`);
+    else toast('error', `Could not add ${value}: no message was received on ${name} or another guessed topic so far. Enter the full topic instead.`);
+    return;
+  }
+  if (compareNames.length >= MAX_COMPARED) {
+    toast('error', `Could not add ${name}: at most ${MAX_COMPARED} topics can be compared.`);
+    return;
+  }
+  $('c-device').value = '';
+  setCompare([...compareNames, name]);
+});
 
 // ---------------------------------------------------------------- publish
 

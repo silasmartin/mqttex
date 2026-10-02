@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TopicTree } from './tree.js';
+import { TopicTree, filterPaste } from './tree.js';
 
 const labels = (tree) => tree.rows().map((n) => `${'  '.repeat(n.depth)}${n.name || '(empty)'}`);
 
@@ -25,6 +25,49 @@ test('a topic can also be a folder', () => {
   assert.equal(a.id, 0);
   assert.equal(a.leaves, 2);
   assert.deepEqual(labels(tree), ['a', '  b']);
+});
+
+test('idOf finds topics by name, folders and unknown names give -1', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/topic/SN1', 'a', 'a/b', 'x//y']);
+  assert.equal(tree.idOf('/topic/SN1'), 0);
+  assert.equal(tree.idOf('a'), 1);
+  assert.equal(tree.idOf('a/b'), 2);
+  assert.equal(tree.idOf('x//y'), 3);
+  assert.equal(tree.idOf('/topic'), -1); // a folder only
+  assert.equal(tree.idOf('/topic/SN2'), -1);
+  assert.equal(tree.idOf('x/y'), -1);
+});
+
+test('idOfIgnoringCase: exact first, then a segment that only differs in case', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/topic/SN7/V0', '/Topic/sn8/V0', '/topic/sn8/V1']);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN7/V0'), 0);
+  assert.equal(tree.idOfIgnoringCase('/topic/sn7/v0'), 0);
+  // /topic/sn8 exists exactly but has no V0 below it; /Topic/sn8/V0 does.
+  assert.equal(tree.idOfIgnoringCase('/topic/sn8/V0'), 1);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN8/v1'), 2);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN9/V0'), -1);
+  assert.equal(tree.idOfIgnoringCase('/topic'), -1);
+});
+
+test('filterPaste: lines and spreadsheet cells become one term of alternatives', () => {
+  assert.equal(filterPaste('SN1', '', ''), null);
+  assert.equal(filterPaste('SN1\nSN2\n', '', ''), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\r\nSN2', '', ''), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\tok\nSN2\tok', '', ''), 'SN1, ok, SN2, ok');
+  assert.equal(filterPaste(' \n \n', '', ''), null);
+});
+
+test('filterPaste: kept apart from the text around it', () => {
+  assert.equal(filterPaste('SN1\nSN2', 'post/json', ''), ' SN1, SN2');
+  assert.equal(filterPaste('SN1\nSN2', '', 'post/json'), 'SN1, SN2 ');
+  assert.equal(filterPaste('SN1\nSN2', 'post/json ', ' x'), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\nSN2', 'SN0,', ''), 'SN1, SN2');
+  const tree = new TopicTree();
+  tree.addTopics(0, ['d/SN1/ok', 'd/SN2/ok', 'd/SN3/ok']);
+  tree.setFilter(`d/ ${filterPaste('SN1\tok\nSN2\tok', 'd/', '').trim()}`);
+  assert.deepEqual(tree.matchingIds().map((id) => tree.names[id]), ['d/SN1/ok', 'd/SN2/ok', 'd/SN3/ok']);
 });
 
 test('counts propagate as deltas to every ancestor', () => {
@@ -91,6 +134,59 @@ test('reset forgets everything', () => {
   assert.deepEqual(tree.rows(), []);
 });
 
+const filtered = (tree, text) => {
+  tree.setFilter(text);
+  return tree.matchingIds().map((id) => tree.names[id]);
+};
+
+test('commas list alternatives (OR)', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/t/SN1/post/json', '/t/SN2/post/json', '/t/SN3/post/json', '/t/SN4/post/json']);
+  assert.deepEqual(filtered(tree, 'SN1,SN3'), ['/t/SN1/post/json', '/t/SN3/post/json']);
+  assert.equal(tree.matches, 2);
+  assert.equal(tree.filtering, true);
+});
+
+test('alternatives combine with further terms (AND)', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/t/SN1/post/json', '/t/SN1/get/json', '/t/SN2/post/json', '/t/SN2/get/json', '/t/SN3/post/json']);
+  assert.deepEqual(filtered(tree, 'SN1, SN2, SN3 post/json'), ['/t/SN1/post/json', '/t/SN2/post/json', '/t/SN3/post/json']);
+  assert.deepEqual(filtered(tree, 'post/json sn2,sn9'), ['/t/SN2/post/json']);
+});
+
+test('spaces around commas do not split terms', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['a/SN1', 'a/SN2', 'a/SN3']);
+  assert.deepEqual(filtered(tree, 'sn1 ,sn2'), ['a/SN1', 'a/SN2']);
+  assert.deepEqual(filtered(tree, 'sn1 ,   sn3'), ['a/SN1', 'a/SN3']);
+});
+
+test('empty alternatives are dropped; only commas means no filter', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['a/SN1', 'a/SN2']);
+  assert.deepEqual(filtered(tree, ',sn1,,'), ['a/SN1']);
+  assert.deepEqual(filtered(tree, 'sn2 , ,'), ['a/SN2']);
+  for (const text of [',', ' , ,, ', '']) {
+    tree.setFilter(text);
+    assert.equal(tree.filtering, false, JSON.stringify(text));
+    assert.deepEqual(tree.matchingIds(), []);
+  }
+});
+
+test('matchingIds follows tree order, skips folders and ignores collapsed nodes', () => {
+  const tree = new TopicTree();
+  // ids are deliberately not in tree order
+  tree.addTopics(0, ['z/SN2', 'a/b/c/SN1', 'a/SN3', 'a']);
+  tree.setFilter('sn,a');
+  tree.toggle(tree.byId[3], false);
+  assert.deepEqual(
+    tree.matchingIds().map((id) => tree.names[id]),
+    ['a', 'a/SN3', 'a/b/c/SN1', 'z/SN2'],
+  );
+  assert.deepEqual(filtered(tree, 'sn'), ['a/SN3', 'a/b/c/SN1', 'z/SN2']);
+  assert.deepEqual(filtered(tree, 'nothing'), []);
+});
+
 test('40 000 topics: build, count, filter and flatten stay fast', () => {
   const tree = new TopicTree();
   const names = Array.from({ length: 40_000 }, (_, i) => `/topic/SN${String(i).padStart(8, '0')}`);
@@ -106,6 +202,9 @@ test('40 000 topics: build, count, filter and flatten stay fast', () => {
   tree.setFilter('sn0000123');
   assert.equal(tree.matches, 10);
   assert.equal(tree.rows().length, 12);
+  tree.setFilter('sn0000123, sn0000456 , sn0003999 topic');
+  assert.equal(tree.matches, 30);
+  assert.equal(tree.matchingIds().length, 30);
   const elapsed = performance.now() - start;
   assert.ok(elapsed < 1000, `took ${elapsed.toFixed(0)} ms`);
 });

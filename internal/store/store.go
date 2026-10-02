@@ -171,6 +171,15 @@ type Preview struct {
 	Msg Message
 }
 
+// Want is what a reader asks for besides names and counts.
+type Want struct {
+	Watch      []uint32 // topics whose latest message is wanted (the rows it shows)
+	WatchAll   bool     // return the watch previews even if unchanged
+	Compare    []uint32 // topics compared side by side, delivered separately from Watch
+	CompareAll bool     // return the compared messages even if unchanged
+	Selected   *uint32  // topic whose history is wanted, nil for none
+}
+
 // Update is everything that changed since the cursor.
 type Update struct {
 	Reset    bool // the store was reset; the reader must drop its state
@@ -180,17 +189,20 @@ type Update struct {
 	More     bool     // more names are pending, poll again soon
 	Counts   []uint32 // flat (id, count) pairs of topics that received messages
 	Previews []Preview
+	Compared []Preview // latest message of the compared topics, uncut by the store
 	History  []Message
 	Stats    Stats
 }
 
 // Poll advances the cursor and returns what changed.
 //
-// watch lists the topics whose latest message the reader wants (the rows it
-// currently shows). With watchAll the previews are returned even if unchanged,
-// which a reader asks for right after its watch list changed. selected is the
-// topic id whose history is wanted, or -1.
-func (s *Store) Poll(cur *Cursor, watch []uint32, watchAll bool, selected int64) Update {
+// w.Watch lists the topics whose latest message the reader wants (the rows it
+// currently shows). With w.WatchAll the previews are returned even if
+// unchanged, which a reader asks for right after its watch list changed;
+// w.CompareAll does the same for w.Compare. w.Selected is the topic whose
+// history is wanted. After an epoch change all of w is ignored: its ids belong
+// to the old topic table and would name unrelated topics in the new one.
+func (s *Store) Poll(cur *Cursor, w Want) Update {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -199,7 +211,7 @@ func (s *Store) Poll(cur *Cursor, watch []uint32, watchAll bool, selected int64)
 	if cur.Epoch != s.epoch {
 		u.Reset = cur.Epoch != 0
 		*cur = Cursor{Epoch: s.epoch}
-		watchAll = true
+		w = Want{}
 	}
 
 	known := cur.Topics
@@ -230,17 +242,11 @@ func (s *Store) Poll(cur *Cursor, watch []uint32, watchAll bool, selected int64)
 		u.Counts = append(u.Counts, uint32(id), s.topics[id].count)
 	}
 
-	for _, id := range watch {
-		if int(id) >= cur.Topics {
-			continue
-		}
-		if t := s.topics[id]; watchAll || t.seq > cur.Seq {
-			u.Previews = append(u.Previews, Preview{ID: id, Msg: t.last})
-		}
-	}
+	u.Previews = s.latest(w.Watch, w.WatchAll, cur)
+	u.Compared = s.latest(w.Compare, w.CompareAll, cur)
 
-	if selected >= 0 && int(selected) < len(s.topics) {
-		if t := s.topics[selected]; t.hist != nil {
+	if w.Selected != nil && int(*w.Selected) < len(s.topics) {
+		if t := s.topics[*w.Selected]; t.hist != nil {
 			u.History = t.hist.after(cur.HistN)
 			if len(u.History) > 0 {
 				cur.HistN = u.History[len(u.History)-1].N
@@ -250,6 +256,22 @@ func (s *Store) Poll(cur *Cursor, watch []uint32, watchAll bool, selected int64)
 
 	cur.Seq = s.seq
 	return u
+}
+
+// latest returns the last message of each listed topic the reader already
+// knows: of all of them with all set, otherwise only of those that changed
+// since the cursor. The caller holds s.mu.
+func (s *Store) latest(ids []uint32, all bool, cur *Cursor) []Preview {
+	var out []Preview
+	for _, id := range ids {
+		if int(id) >= cur.Topics {
+			continue
+		}
+		if t := s.topics[id]; all || t.seq > cur.Seq {
+			out = append(out, Preview{ID: id, Msg: t.last})
+		}
+	}
+	return out
 }
 
 // ring is a fixed-size buffer of the most recent messages.

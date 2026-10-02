@@ -78,6 +78,40 @@ export class TopicTree {
     this._rows = null;
   }
 
+  // Id of a topic by its full name, -1 if the server has not sent it (yet).
+  idOf(name) {
+    let node = this.root;
+    for (const part of name.split('/')) {
+      node = node.map && node.map.get(part);
+      if (!node) return -1;
+    }
+    return node.id;
+  }
+
+  // Like idOf, but a segment without an exact match may match a child that
+  // only differs in case; exact segments are tried first. For names typed by
+  // hand, since topic names are case-sensitive and serial numbers often not.
+  idOfIgnoringCase(name) {
+    const parts = name.split('/');
+    const find = (node, i) => {
+      if (i === parts.length) return node.id;
+      if (!node.map) return -1;
+      const exact = node.map.get(parts[i]);
+      if (exact) {
+        const id = find(exact, i + 1);
+        if (id >= 0) return id;
+      }
+      const want = parts[i].toLowerCase();
+      for (const kid of node.kids) {
+        if (kid === exact || kid.name.toLowerCase() !== want) continue;
+        const id = find(kid, i + 1);
+        if (id >= 0) return id;
+      }
+      return -1;
+    };
+    return find(this.root, 0);
+  }
+
   // pairs is a flat Uint32Array of (id, count). Returns the number of topics updated.
   applyCounts(pairs, now) {
     let updated = 0;
@@ -96,9 +130,18 @@ export class TopicTree {
     return updated;
   }
 
-  // Whitespace separates terms; a topic must contain all of them.
+  // Whitespace separates terms and a topic must contain all of them (AND).
+  // Commas inside a term list alternatives (OR): "sn1,sn2 post" is
+  // (sn1 or sn2) and post. Spaces around commas do not split terms, so
+  // "sn1, sn2" works as well. The parsed form is an array of alternative
+  // arrays, which keeps _matches a plain nested loop.
   setFilter(text) {
-    this.terms = text.toLowerCase().split(/\s+/).filter(Boolean);
+    this.terms = text
+      .toLowerCase()
+      .replace(/\s*,\s*/g, ',')
+      .split(/\s+/)
+      .map((term) => term.split(',').filter(Boolean))
+      .filter((alts) => alts.length > 0);
     this.gen++;
     this.matches = 0;
     if (this.filtering) {
@@ -111,10 +154,40 @@ export class TopicTree {
 
   _matches(id) {
     const name = this.lower[id];
-    for (const term of this.terms) {
-      if (!name.includes(term)) return false;
+    for (const alts of this.terms) {
+      let hit = false;
+      for (const alt of alts) {
+        if (name.includes(alt)) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) return false;
     }
     return true;
+  }
+
+  // Ids of all topics matching the filter, in tree order (as rows() sorts
+  // them), independent of which folders are expanded. Without a filter: none.
+  matchingIds() {
+    const ids = [];
+    if (!this.filtering) return ids;
+    const stack = [];
+    const pushKids = (node) => {
+      if (!node.sorted) {
+        node.kids.sort(byName);
+        node.sorted = true;
+      }
+      for (let i = node.kids.length - 1; i >= 0; i--) stack.push(node.kids[i]);
+    };
+    pushKids(this.root);
+    while (stack.length) {
+      const node = stack.pop();
+      if (node.mark !== this.gen) continue; // no match in this subtree
+      if (node.id >= 0 && this._matches(node.id)) ids.push(node.id);
+      pushKids(node);
+    }
+    return ids;
   }
 
   _mark(node) {
@@ -169,6 +242,23 @@ export class TopicTree {
     }
     return (this._rows = rows);
   }
+}
+
+// Text pasted into the filter. A column or block of cells copied from a
+// spreadsheet would lose its line breaks and tabs in the input and run
+// together, so every cell becomes an alternative of one term, separated from
+// the text around it. Returns the text to insert, or null for a plain paste.
+export function filterPaste(text, before, after) {
+  if (!/[\r\n\t]/.test(text)) return null;
+  let list = text
+    .split(/[\r\n\t]+/)
+    .map((cell) => cell.trim())
+    .filter(Boolean)
+    .join(', ');
+  if (list === '') return null;
+  if (/[^\s,]$/.test(before)) list = ` ${list}`;
+  if (/^[^\s,]/.test(after)) list = `${list} `;
+  return list;
 }
 
 function byName(a, b) {
