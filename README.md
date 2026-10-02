@@ -9,7 +9,7 @@ One Go binary, no database, UI in your browser.
 ## Features
 
 - Live topic tree with message counts, subtree totals and an activity indicator per row
-- Instant filter over all topics (several terms are combined with AND, `/` focuses the input)
+- Instant filter over all topics (several terms are combined with AND, a comma lists alternatives: `SN1, SN2, SN3 post/json`; `/` focuses the input)
 - Per-topic view: latest value (JSON is pretty-printed), message history with millisecond timestamps and the interval between messages, so you can see at a glance whether a device is still pushing
 - Compare several topics side by side: one column per device, one row per JSON field, live values, differences highlighted
 - Publish with QoS and retain, and clear retained messages
@@ -57,6 +57,8 @@ To see several devices next to each other, add their topics to the comparison: s
 - one row per JSON field (`a.b.c`, arrays as `a[0]`); payloads that are not JSON form a single `(payload)` row
 - rows whose values differ are highlighted, changed values flash, missing fields show `–`
 - **Only differences** hides the rows that are equal everywhere, × removes a column, **Clear** empties the list
+
+With a filter active, **Compare matches** next to the filter adds all matching topics at once. Several serial numbers work as comma-separated alternatives (`SN1, SN2, SN3 post/json`), and a pasted list with one serial number per line is turned into such a filter. Topics beyond the limit of 32 are skipped with a notice.
 
 **Add device** takes a serial number and builds the topic from the first column by swapping the device part, so you do not have to find each device in the tree. A full topic works as well. Up to 32 topics can be compared; the list is kept in the browser across reloads.
 

@@ -38,8 +38,9 @@
     <section class="pane tree-pane" aria-label="Topics">
       <div class="filter">
         <label class="sr-only" for="filter">Filter topics</label>
-        <input id="filter" type="search" placeholder="Filter topics, e.g. a serial number   ( / )" autocomplete="off" spellcheck="false">
+        <input id="filter" type="search" placeholder="Filter topics, e.g. SN1, SN2 post/json   ( / )" autocomplete="off" spellcheck="false">
         <span id="filter-count" class="muted"></span>
+        <button id="filter-compare" class="btn small" type="button" title="Add all matching topics to the comparison" hidden>Compare matches</button>
       </div>
       <div id="tree" class="tree" tabindex="0" role="tree" aria-label="Topic tree">
         <div id="tree-spacer" class="tree-spacer"></div>

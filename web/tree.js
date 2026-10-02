@@ -96,9 +96,18 @@ export class TopicTree {
     return updated;
   }
 
-  // Whitespace separates terms; a topic must contain all of them.
+  // Whitespace separates terms and a topic must contain all of them (AND).
+  // Commas inside a term list alternatives (OR): "sn1,sn2 post" is
+  // (sn1 or sn2) and post. Spaces around commas do not split terms, so
+  // "sn1, sn2" works as well. The parsed form is an array of alternative
+  // arrays, which keeps _matches a plain nested loop.
   setFilter(text) {
-    this.terms = text.toLowerCase().split(/\s+/).filter(Boolean);
+    this.terms = text
+      .toLowerCase()
+      .replace(/\s*,\s*/g, ',')
+      .split(/\s+/)
+      .map((term) => term.split(',').filter(Boolean))
+      .filter((alts) => alts.length > 0);
     this.gen++;
     this.matches = 0;
     if (this.filtering) {
@@ -111,10 +120,40 @@ export class TopicTree {
 
   _matches(id) {
     const name = this.lower[id];
-    for (const term of this.terms) {
-      if (!name.includes(term)) return false;
+    for (const alts of this.terms) {
+      let hit = false;
+      for (const alt of alts) {
+        if (name.includes(alt)) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) return false;
     }
     return true;
+  }
+
+  // Ids of all topics matching the filter, in tree order (as rows() sorts
+  // them), independent of which folders are expanded. Without a filter: none.
+  matchingIds() {
+    const ids = [];
+    if (!this.filtering) return ids;
+    const stack = [];
+    const pushKids = (node) => {
+      if (!node.sorted) {
+        node.kids.sort(byName);
+        node.sorted = true;
+      }
+      for (let i = node.kids.length - 1; i >= 0; i--) stack.push(node.kids[i]);
+    };
+    pushKids(this.root);
+    while (stack.length) {
+      const node = stack.pop();
+      if (node.mark !== this.gen) continue; // no match in this subtree
+      if (node.id >= 0 && this._matches(node.id)) ids.push(node.id);
+      pushKids(node);
+    }
+    return ids;
   }
 
   _mark(node) {

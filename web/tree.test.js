@@ -91,6 +91,59 @@ test('reset forgets everything', () => {
   assert.deepEqual(tree.rows(), []);
 });
 
+const filtered = (tree, text) => {
+  tree.setFilter(text);
+  return tree.matchingIds().map((id) => tree.names[id]);
+};
+
+test('commas list alternatives (OR)', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/t/SN1/post/json', '/t/SN2/post/json', '/t/SN3/post/json', '/t/SN4/post/json']);
+  assert.deepEqual(filtered(tree, 'SN1,SN3'), ['/t/SN1/post/json', '/t/SN3/post/json']);
+  assert.equal(tree.matches, 2);
+  assert.equal(tree.filtering, true);
+});
+
+test('alternatives combine with further terms (AND)', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/t/SN1/post/json', '/t/SN1/get/json', '/t/SN2/post/json', '/t/SN2/get/json', '/t/SN3/post/json']);
+  assert.deepEqual(filtered(tree, 'SN1, SN2, SN3 post/json'), ['/t/SN1/post/json', '/t/SN2/post/json', '/t/SN3/post/json']);
+  assert.deepEqual(filtered(tree, 'post/json sn2,sn9'), ['/t/SN2/post/json']);
+});
+
+test('spaces around commas do not split terms', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['a/SN1', 'a/SN2', 'a/SN3']);
+  assert.deepEqual(filtered(tree, 'sn1 ,sn2'), ['a/SN1', 'a/SN2']);
+  assert.deepEqual(filtered(tree, 'sn1 ,   sn3'), ['a/SN1', 'a/SN3']);
+});
+
+test('empty alternatives are dropped; only commas means no filter', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['a/SN1', 'a/SN2']);
+  assert.deepEqual(filtered(tree, ',sn1,,'), ['a/SN1']);
+  assert.deepEqual(filtered(tree, 'sn2 , ,'), ['a/SN2']);
+  for (const text of [',', ' , ,, ', '']) {
+    tree.setFilter(text);
+    assert.equal(tree.filtering, false, JSON.stringify(text));
+    assert.deepEqual(tree.matchingIds(), []);
+  }
+});
+
+test('matchingIds follows tree order, skips folders and ignores collapsed nodes', () => {
+  const tree = new TopicTree();
+  // ids are deliberately not in tree order
+  tree.addTopics(0, ['z/SN2', 'a/b/c/SN1', 'a/SN3', 'a']);
+  tree.setFilter('sn,a');
+  tree.toggle(tree.byId[3], false);
+  assert.deepEqual(
+    tree.matchingIds().map((id) => tree.names[id]),
+    ['a', 'a/SN3', 'a/b/c/SN1', 'z/SN2'],
+  );
+  assert.deepEqual(filtered(tree, 'sn'), ['a/SN3', 'a/b/c/SN1', 'z/SN2']);
+  assert.deepEqual(filtered(tree, 'nothing'), []);
+});
+
 test('40 000 topics: build, count, filter and flatten stay fast', () => {
   const tree = new TopicTree();
   const names = Array.from({ length: 40_000 }, (_, i) => `/topic/SN${String(i).padStart(8, '0')}`);
@@ -106,6 +159,9 @@ test('40 000 topics: build, count, filter and flatten stay fast', () => {
   tree.setFilter('sn0000123');
   assert.equal(tree.matches, 10);
   assert.equal(tree.rows().length, 12);
+  tree.setFilter('sn0000123, sn0000456 , sn0003999 topic');
+  assert.equal(tree.matches, 30);
+  assert.equal(tree.matchingIds().length, 30);
   const elapsed = performance.now() - start;
   assert.ok(elapsed < 1000, `took ${elapsed.toFixed(0)} ms`);
 });

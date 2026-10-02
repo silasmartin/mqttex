@@ -353,6 +353,7 @@ function renderTree() {
   }
 
   $('filter-count').textContent = tree.filtering ? `${fullFmt.format(tree.matches)} of ${fullFmt.format(tree.size)}` : '';
+  $('filter-compare').hidden = !(tree.filtering && tree.matches > 0);
   const empty = $('tree-empty');
   empty.hidden = rows.length > 0;
   if (rows.length === 0) empty.textContent = emptyTreeText();
@@ -433,13 +434,43 @@ treeEl.addEventListener('keydown', (ev) => {
 // ---------------------------------------------------------------- filter
 
 let filterTimer = null;
+function applyFilter() {
+  filterTimer = null;
+  tree.setFilter($('filter').value);
+  treeEl.scrollTop = 0;
+  scheduleRender();
+}
 $('filter').addEventListener('input', () => {
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => {
-    tree.setFilter($('filter').value);
-    treeEl.scrollTop = 0;
-    scheduleRender();
-  }, 100);
+  filterTimer = setTimeout(applyFilter, 100);
+});
+// A pasted column of serial numbers would lose its line breaks in the input
+// and run together, so they become the comma separator of the filter.
+$('filter').addEventListener('paste', (ev) => {
+  const text = ev.clipboardData?.getData('text') ?? '';
+  if (!/[\r\n]/.test(text)) return;
+  ev.preventDefault();
+  const input = ev.target;
+  input.setRangeText(text.trim().replace(/\s*[\r\n]\s*/g, ', '), input.selectionStart, input.selectionEnd, 'end');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+});
+$('filter-compare').addEventListener('click', () => {
+  // The filter is applied after a short delay; make sure the matches are current.
+  if (filterTimer !== null) {
+    clearTimeout(filterTimer);
+    applyFilter();
+  }
+  const missing = tree.matchingIds().map((id) => tree.names[id]).filter((name) => !compareNames.includes(name));
+  const added = missing.slice(0, Math.max(0, MAX_COMPARED - compareNames.length));
+  if (added.length > 0) setCompare([...compareNames, ...added]);
+  if (added.length < missing.length) {
+    toast('error', `Added ${added.length} of ${missing.length} matches; the comparison holds at most ${MAX_COMPARED} topics.`);
+  } else if (added.length === 0) {
+    toast('ok', 'All matches are already in the comparison.');
+  } else {
+    toast('ok', `Added ${added.length} ${added.length === 1 ? 'topic' : 'topics'} to the comparison.`);
+  }
+  showTab('compare');
 });
 $('filter').addEventListener('keydown', (ev) => {
   if (ev.key === 'ArrowDown') {
