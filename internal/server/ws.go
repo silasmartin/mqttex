@@ -22,6 +22,8 @@ const (
 	previewBytes   = 160
 	historyBytes   = 256 << 10
 	maxWatchedRows = 2000
+	maxCompared    = 32       // topics in a comparison; the table is meant for a handful of devices
+	compareBytes   = 64 << 10 // far above previewBytes: the table needs whole JSON documents
 
 	frameCounts = 1 // binary frame: uint32 LE [frameCounts, n, id, count, id, count, ...]
 )
@@ -78,6 +80,7 @@ type wireTick struct {
 	First    uint32        `json:"first"`
 	Names    []string      `json:"names,omitempty"`
 	Previews []wirePreview `json:"previews,omitempty"`
+	Compare  []wirePreview `json:"compare,omitempty"`
 	Selected int64         `json:"selected"`
 	History  []wireMessage `json:"history,omitempty"`
 	Stats    store.Stats   `json:"stats"`
@@ -86,19 +89,21 @@ type wireTick struct {
 
 // clientMsg is what the browser sends: the rows it shows and the topic it has open.
 type clientMsg struct {
-	Type  string   `json:"t"` // "watch" or "select"
+	Type  string   `json:"t"` // "watch", "select" or "compare"
 	Epoch uint64   `json:"epoch"`
 	IDs   []uint32 `json:"ids"`
 	ID    int64    `json:"id"`
 }
 
 type wsClient struct {
-	mu       sync.Mutex
-	cur      store.Cursor
-	watch    []uint32
-	watchAll bool
-	selected int64
-	selEpoch uint64
+	mu         sync.Mutex
+	cur        store.Cursor
+	watch      []uint32
+	watchAll   bool
+	compare    []uint32
+	compareAll bool
+	selected   int64
+	selEpoch   uint64
 }
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +169,14 @@ func (s *Server) handleClientMsg(c *wsClient, m clientMsg) {
 			m.IDs = m.IDs[:maxWatchedRows]
 		}
 		c.watch, c.watchAll = m.IDs, true
+	case "compare":
+		if m.Epoch != c.cur.Epoch {
+			return
+		}
+		if len(m.IDs) > maxCompared {
+			m.IDs = m.IDs[:maxCompared]
+		}
+		c.compare, c.compareAll = m.IDs, true
 	case "select":
 		if c.selected >= 0 {
 			s.store.Release(c.selEpoch, uint32(c.selected))
@@ -180,11 +193,12 @@ func (s *Server) handleClientMsg(c *wsClient, m clientMsg) {
 // counts frame so the browser always knows an id before it sees its count.
 func (s *Server) sendUpdate(ctx context.Context, conn *websocket.Conn, c *wsClient) (more bool, err error) {
 	c.mu.Lock()
-	u := s.store.Poll(&c.cur, c.watch, c.watchAll, c.selected)
-	c.watchAll = false
+	u := s.store.Poll(&c.cur, store.Want{Watch: c.watch, WatchAll: c.watchAll, Selected: c.selected,
+		Compare: c.compare, CompareAll: c.compareAll})
+	c.watchAll, c.compareAll = false, false
 	if u.Reset {
 		// Ids from before the reset mean nothing now.
-		c.watch, c.selected = nil, -1
+		c.watch, c.compare, c.selected = nil, nil, -1
 	}
 	selected := c.selected
 	c.mu.Unlock()
@@ -193,6 +207,10 @@ func (s *Server) sendUpdate(ctx context.Context, conn *websocket.Conn, c *wsClie
 		Selected: selected, Stats: u.Stats, Status: s.broker.Status()}
 	for _, p := range u.Previews {
 		tick.Previews = append(tick.Previews, wirePreview{ID: p.ID, wirePayload: encodePayload(p.Msg.Payload, previewBytes),
+			Time: p.Msg.Time.UnixMilli(), Retain: p.Msg.Retain})
+	}
+	for _, p := range u.Compared {
+		tick.Compare = append(tick.Compare, wirePreview{ID: p.ID, wirePayload: encodePayload(p.Msg.Payload, compareBytes),
 			Time: p.Msg.Time.UnixMilli(), Retain: p.Msg.Retain})
 	}
 	for _, m := range u.History {

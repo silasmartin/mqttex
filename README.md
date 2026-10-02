@@ -11,6 +11,7 @@ One Go binary, no database, UI in your browser.
 - Live topic tree with message counts, subtree totals and an activity indicator per row
 - Instant filter over all topics (several terms are combined with AND, `/` focuses the input)
 - Per-topic view: latest value (JSON is pretty-printed), message history with millisecond timestamps and the interval between messages, so you can see at a glance whether a device is still pushing
+- Compare several topics side by side: one column per device, one row per JSON field, live values, differences highlighted
 - Publish with QoS and retain, and clear retained messages
 - Saved connection profiles: mqtt, mqtts, ws, wss, username/password, several subscriptions
 - Connection problems are shown with their cause: refused connections, failed authentication and subscriptions the broker rejected (for example because of an ACL)
@@ -48,6 +49,19 @@ Subscriptions are MQTT topic filters: `#` matches all remaining levels, `+` matc
 | `-no-open` | | do not open the browser on start |
 | `-web` | | serve the UI from a directory instead of the embedded copy (development) |
 
+## Compare devices
+
+To see several devices next to each other, add their topics to the comparison: select a topic and press **+ Compare**, or press `c` on a topic in the tree. Topics in the comparison carry a `cmp` badge in the tree. The **Compare** tab shows them as a table:
+
+- one column per topic, titled by the part of the topic that differs (for `/topic/SN1/V0/post/json` and `/topic/SN2/V0/post/json` that is `SN1` and `SN2`), with the age of its last message
+- one row per JSON field (`a.b.c`, arrays as `a[0]`); payloads that are not JSON form a single `(payload)` row
+- rows whose values differ are highlighted, changed values flash, missing fields show `–`
+- **Only differences** hides the rows that are equal everywhere, × removes a column, **Clear** empties the list
+
+**Add device** takes a serial number and builds the topic from the first column by swapping the device part, so you do not have to find each device in the tree. A full topic works as well. Up to 32 topics can be compared; the list is kept in the browser across reloads.
+
+The comparison gets the full payload of each topic (up to 64 KB), independent of the shortened previews in the tree.
+
 ## How it handles the load
 
 - **Ingest is one map lookup.** Every message updates an in-memory topic table (about 20 ns, no allocation). Nothing is written to disk and no per-message event is emitted.
@@ -73,7 +87,7 @@ History is recorded for a topic while it is open (last 500 messages). All other 
 
 ```bash
 go test -race ./...            # unit tests and an end-to-end test against an embedded broker
-node --test web/tree.test.js   # topic tree model
+(cd web && node --test)        # topic tree and compare table models
 go run . -web web              # serve the UI from disk while editing it
 ```
 

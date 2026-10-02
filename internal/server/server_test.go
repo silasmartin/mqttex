@@ -128,6 +128,7 @@ type wsSession struct {
 	names    map[uint32]string
 	counts   map[uint32]uint32
 	previews map[uint32]wirePreview
+	compare  map[uint32]wirePreview
 	history  []wireMessage
 	last     wireTick
 }
@@ -140,7 +141,7 @@ func (e *env) dialWS() *wsSession {
 	}
 	conn.SetReadLimit(64 << 20)
 	e.t.Cleanup(func() { conn.CloseNow() })
-	return &wsSession{t: e.t, conn: conn, names: map[uint32]string{}, counts: map[uint32]uint32{}, previews: map[uint32]wirePreview{}}
+	return &wsSession{t: e.t, conn: conn, names: map[uint32]string{}, counts: map[uint32]uint32{}, previews: map[uint32]wirePreview{}, compare: map[uint32]wirePreview{}}
 }
 
 func (s *wsSession) send(m clientMsg) {
@@ -189,6 +190,9 @@ func (s *wsSession) readUntil(what string, cond func() bool) {
 		}
 		for _, p := range tick.Previews {
 			s.previews[p.ID] = p
+		}
+		for _, p := range tick.Compare {
+			s.compare[p.ID] = p
 		}
 		s.history = append(s.history, tick.History...)
 		s.last = tick
@@ -259,6 +263,30 @@ func TestEndToEndBrokerToBrowser(t *testing.T) {
 	ws.readUntil("the watched preview", func() bool { return len(ws.previews) == 1 })
 	if pv := ws.previews[id]; pv.Text == nil || *pv.Text != `{"round":2}` {
 		t.Fatalf("preview = %+v", pv)
+	}
+
+	// The compare channel carries whole payloads, unlike the 160-byte previews.
+	long := `{"blob":"` + strings.Repeat("x", 300) + `"}`
+	if err := mq.Publish("/topic/LONG", []byte(long), false, 0); err != nil {
+		t.Fatal(err)
+	}
+	ws.readUntil("the long topic", func() bool { return len(ws.names) == topics+1 })
+	var longID uint32
+	for i, name := range ws.names {
+		if name == "/topic/LONG" {
+			longID = i
+		}
+	}
+	ws.send(clientMsg{Type: "compare", Epoch: ws.last.Epoch, IDs: []uint32{longID, id}})
+	ws.readUntil("the compared messages", func() bool { return len(ws.compare) == 2 })
+	if cv := ws.compare[longID]; cv.Text == nil || *cv.Text != long || cv.Trunc || cv.Size != len(long) {
+		t.Fatalf("compared = %+v", cv)
+	}
+	if cv := ws.compare[id]; cv.Text == nil || *cv.Text != `{"round":2}` {
+		t.Fatalf("compared = %+v", cv)
+	}
+	if len(ws.previews) != 1 {
+		t.Fatalf("compare leaked into previews: %d", len(ws.previews))
 	}
 
 	// Selecting a topic starts its history with the latest message; publishing

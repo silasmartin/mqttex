@@ -24,7 +24,7 @@ func TestPollDeliversNamesOnceAndOnlyChangedCounts(t *testing.T) {
 	s.Ingest("/topic/a", msg("2"))
 
 	var cur Cursor
-	u := s.Poll(&cur, nil, false, -1)
+	u := s.Poll(&cur, Want{Selected: -1})
 	if u.Reset {
 		t.Fatal("first poll must not report a reset")
 	}
@@ -38,13 +38,13 @@ func TestPollDeliversNamesOnceAndOnlyChangedCounts(t *testing.T) {
 		t.Fatalf("stats = %+v", u.Stats)
 	}
 
-	if u = s.Poll(&cur, nil, false, -1); len(u.Names) != 0 || len(u.Counts) != 0 {
+	if u = s.Poll(&cur, Want{Selected: -1}); len(u.Names) != 0 || len(u.Counts) != 0 {
 		t.Fatalf("idle poll returned names=%v counts=%v", u.Names, u.Counts)
 	}
 
 	s.Ingest("/topic/b", msg("2"))
 	s.Ingest("/topic/c", msg("1"))
-	u = s.Poll(&cur, nil, false, -1)
+	u = s.Poll(&cur, Want{Selected: -1})
 	if len(u.Names) != 1 || u.FirstID != 2 {
 		t.Fatalf("names = %v first = %d", u.Names, u.FirstID)
 	}
@@ -60,12 +60,12 @@ func TestPollChunksNamesWithoutLosingCounts(t *testing.T) {
 		s.Ingest(fmt.Sprintf("t/%d", i), msg("x"))
 	}
 	var cur Cursor
-	u := s.Poll(&cur, nil, false, -1)
+	u := s.Poll(&cur, Want{Selected: -1})
 	if !u.More || len(u.Names) != maxNamesPerPoll {
 		t.Fatalf("more=%v names=%d", u.More, len(u.Names))
 	}
 	seen := len(u.Counts) / 2
-	u = s.Poll(&cur, nil, false, -1)
+	u = s.Poll(&cur, Want{Selected: -1})
 	if u.More || len(u.Names) != 10 || int(u.FirstID) != maxNamesPerPoll {
 		t.Fatalf("more=%v names=%d first=%d", u.More, len(u.Names), u.FirstID)
 	}
@@ -79,21 +79,21 @@ func TestPreviewsOnlyForWatchedAndChanged(t *testing.T) {
 	s.Ingest("a", msg("a1"))
 	s.Ingest("b", msg("b1"))
 	var cur Cursor
-	s.Poll(&cur, nil, false, -1)
+	s.Poll(&cur, Want{Selected: -1})
 
-	u := s.Poll(&cur, []uint32{1}, true, -1)
+	u := s.Poll(&cur, Want{Watch: []uint32{1}, WatchAll: true, Selected: -1})
 	if len(u.Previews) != 1 || u.Previews[0].ID != 1 || string(u.Previews[0].Msg.Payload) != "b1" {
 		t.Fatalf("previews = %+v", u.Previews)
 	}
-	if u = s.Poll(&cur, []uint32{1}, false, -1); len(u.Previews) != 0 {
+	if u = s.Poll(&cur, Want{Watch: []uint32{1}, Selected: -1}); len(u.Previews) != 0 {
 		t.Fatalf("unchanged watched topic was resent: %+v", u.Previews)
 	}
 	s.Ingest("a", msg("a2"))
-	if u = s.Poll(&cur, []uint32{1}, false, -1); len(u.Previews) != 0 {
+	if u = s.Poll(&cur, Want{Watch: []uint32{1}, Selected: -1}); len(u.Previews) != 0 {
 		t.Fatalf("unwatched topic leaked: %+v", u.Previews)
 	}
 	s.Ingest("b", msg("b2"))
-	if u = s.Poll(&cur, []uint32{1, 99}, false, -1); len(u.Previews) != 1 || string(u.Previews[0].Msg.Payload) != "b2" {
+	if u = s.Poll(&cur, Want{Watch: []uint32{1, 99}, Selected: -1}); len(u.Previews) != 1 || string(u.Previews[0].Msg.Payload) != "b2" {
 		t.Fatalf("previews = %+v", u.Previews)
 	}
 }
@@ -103,21 +103,21 @@ func TestHistoryOnlyWhileSelected(t *testing.T) {
 	s.Ingest("a", msg("1"))
 	s.Ingest("a", msg("2"))
 	var cur Cursor
-	s.Poll(&cur, nil, false, -1)
+	s.Poll(&cur, Want{Selected: -1})
 
-	if u := s.Poll(&cur, nil, false, 0); len(u.History) != 0 {
+	if u := s.Poll(&cur, Want{Selected: 0}); len(u.History) != 0 {
 		t.Fatalf("history without select: %+v", u.History)
 	}
 	if !s.Select(cur.Epoch, 0) {
 		t.Fatal("select failed")
 	}
-	u := s.Poll(&cur, nil, false, 0)
+	u := s.Poll(&cur, Want{Selected: 0})
 	if len(u.History) != 1 || string(u.History[0].Payload) != "2" || u.History[0].N != 2 {
 		t.Fatalf("seed history = %+v", u.History)
 	}
 	s.Ingest("a", msg("3"))
 	s.Ingest("a", msg("4"))
-	u = s.Poll(&cur, nil, false, 0)
+	u = s.Poll(&cur, Want{Selected: 0})
 	if len(u.History) != 2 || u.History[0].N != 3 || u.History[1].N != 4 {
 		t.Fatalf("history = %+v", u.History)
 	}
@@ -126,12 +126,12 @@ func TestHistoryOnlyWhileSelected(t *testing.T) {
 	s.Select(cur.Epoch, 0)
 	s.Release(cur.Epoch, 0)
 	s.Ingest("a", msg("5"))
-	if u = s.Poll(&cur, nil, false, 0); len(u.History) != 1 {
+	if u = s.Poll(&cur, Want{Selected: 0}); len(u.History) != 1 {
 		t.Fatalf("history after partial release = %+v", u.History)
 	}
 	s.Release(cur.Epoch, 0)
 	s.Ingest("a", msg("6"))
-	if u = s.Poll(&cur, nil, false, 0); len(u.History) != 0 {
+	if u = s.Poll(&cur, Want{Selected: 0}); len(u.History) != 0 {
 		t.Fatalf("history after release = %+v", u.History)
 	}
 }
@@ -154,7 +154,7 @@ func TestResetIsReportedAndStaleIdsAreRejected(t *testing.T) {
 	s := New(0)
 	s.Ingest("a", msg("1"))
 	var cur Cursor
-	s.Poll(&cur, nil, false, -1)
+	s.Poll(&cur, Want{Selected: -1})
 	old := cur.Epoch
 
 	s.Reset()
@@ -162,7 +162,7 @@ func TestResetIsReportedAndStaleIdsAreRejected(t *testing.T) {
 	if s.Select(old, 0) {
 		t.Fatal("select with a stale epoch must fail")
 	}
-	u := s.Poll(&cur, nil, false, -1)
+	u := s.Poll(&cur, Want{Selected: -1})
 	if !u.Reset || len(u.Names) != 1 || u.Names[0] != "b" || u.Stats.Messages != 1 {
 		t.Fatalf("update after reset = %+v", u)
 	}
@@ -175,9 +175,47 @@ func TestMaxTopicsDropsNewTopicsOnly(t *testing.T) {
 	s.Ingest("c", msg("1"))
 	s.Ingest("a", msg("2"))
 	var cur Cursor
-	u := s.Poll(&cur, nil, false, -1)
+	u := s.Poll(&cur, Want{Selected: -1})
 	if u.Stats.Topics != 2 || u.Stats.Dropped != 1 || u.Stats.Messages != 3 {
 		t.Fatalf("stats = %+v", u.Stats)
+	}
+}
+
+func TestComparedOnlyForComparedAndChanged(t *testing.T) {
+	s := New(0)
+	s.Ingest("a", msg("a1"))
+	s.Ingest("b", msg("b1"))
+	s.Ingest("c", msg("c1"))
+	var cur Cursor
+	s.Poll(&cur, Want{Selected: -1})
+
+	// CompareAll sends every compared topic, and only those. Compare is
+	// independent of Watch.
+	u := s.Poll(&cur, Want{Compare: []uint32{0, 2, 99}, CompareAll: true, Selected: -1})
+	if len(u.Compared) != 2 || u.Compared[0].ID != 0 || u.Compared[1].ID != 2 || string(u.Compared[1].Msg.Payload) != "c1" {
+		t.Fatalf("compared = %+v", u.Compared)
+	}
+	if len(u.Previews) != 0 {
+		t.Fatalf("compare leaked into previews: %+v", u.Previews)
+	}
+
+	if u = s.Poll(&cur, Want{Compare: []uint32{0, 2}, Selected: -1}); len(u.Compared) != 0 {
+		t.Fatalf("unchanged compared topics were resent: %+v", u.Compared)
+	}
+	s.Ingest("b", msg("b2"))
+	if u = s.Poll(&cur, Want{Compare: []uint32{0, 2}, Selected: -1}); len(u.Compared) != 0 {
+		t.Fatalf("uncompared topic leaked: %+v", u.Compared)
+	}
+	s.Ingest("c", msg("c2"))
+	if u = s.Poll(&cur, Want{Compare: []uint32{0, 2}, Selected: -1}); len(u.Compared) != 1 || u.Compared[0].ID != 2 || string(u.Compared[0].Msg.Payload) != "c2" {
+		t.Fatalf("compared = %+v", u.Compared)
+	}
+
+	// A new epoch behaves like CompareAll, even without asking for it.
+	s.Reset()
+	s.Ingest("x", msg("x1"))
+	if u = s.Poll(&cur, Want{Compare: []uint32{0}, Selected: -1}); !u.Reset || len(u.Compared) != 1 || string(u.Compared[0].Msg.Payload) != "x1" {
+		t.Fatalf("after reset: reset=%v compared = %+v", u.Reset, u.Compared)
 	}
 }
 
@@ -201,7 +239,7 @@ func TestConcurrentIngestAndPoll(t *testing.T) {
 	var cur Cursor
 	drain := func() {
 		for {
-			u := s.Poll(&cur, nil, false, -1)
+			u := s.Poll(&cur, Want{Selected: -1})
 			for id, c := range countsMap(u.Counts) {
 				counts[id] = c
 			}
@@ -255,11 +293,11 @@ func BenchmarkPoll40kTopicsAllDirty(b *testing.B) {
 		s.Ingest(names[i], msg("x"))
 	}
 	var cur Cursor
-	s.Poll(&cur, nil, false, -1)
-	s.Poll(&cur, nil, false, -1)
+	s.Poll(&cur, Want{Selected: -1})
+	s.Poll(&cur, Want{Selected: -1})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		cur.Seq = 0
-		s.Poll(&cur, nil, false, -1)
+		s.Poll(&cur, Want{Selected: -1})
 	}
 }

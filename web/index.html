@@ -48,57 +48,85 @@
     </section>
 
     <section class="pane detail-pane" aria-label="Selected topic">
-      <div id="detail-empty" class="empty">Select a topic to see its value and watch new messages arrive.</div>
-
-      <div id="detail" hidden>
-        <div class="topic-head">
-          <h1 id="d-topic" class="mono"></h1>
-          <button id="d-copy" class="btn small" type="button">Copy topic</button>
-        </div>
-
-        <dl class="facts">
-          <div><dt>Messages</dt><dd id="d-count">0</dd></div>
-          <div><dt>Last received</dt><dd id="d-last">-</dd></div>
-          <div><dt>Interval</dt><dd id="d-interval">-</dd></div>
-          <div><dt>Size</dt><dd id="d-size">-</dd></div>
-          <div><dt>QoS</dt><dd id="d-qos">-</dd></div>
-          <div><dt>Retained</dt><dd id="d-retain">-</dd></div>
-        </dl>
-
-        <div class="section-head">
-          <h2 id="d-value-title">Latest value</h2>
-          <button id="d-live" class="btn small" type="button" hidden>Back to live</button>
-          <button id="d-copy-value" class="btn small" type="button">Copy value</button>
-        </div>
-        <pre id="d-value" class="value mono" tabindex="0"></pre>
-        <p id="d-props" class="muted mono" hidden></p>
-
-        <div class="section-head">
-          <h2>History</h2>
-          <span class="muted">recorded while this topic is open, newest first</span>
-        </div>
-        <ol id="d-history" class="history mono"></ol>
+      <div class="tabs" role="tablist" aria-label="Detail view">
+        <button id="tab-topic" class="tab" type="button" role="tab" aria-selected="true" aria-controls="panel-topic">Topic</button>
+        <button id="tab-compare" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-compare">Compare (0)</button>
       </div>
 
-      <form id="publish" class="publish">
-        <h2>Publish</h2>
-        <label for="p-topic">Topic</label>
-        <input id="p-topic" class="mono" type="text" autocomplete="off" spellcheck="false" required>
-        <label for="p-payload">Payload</label>
-        <textarea id="p-payload" class="mono" rows="4" spellcheck="false"></textarea>
-        <div class="publish-row">
-          <label for="p-qos">QoS</label>
-          <select id="p-qos">
-            <option value="0">0</option>
-            <option value="1">1</option>
-            <option value="2">2</option>
-          </select>
-          <label class="check"><input id="p-retain" type="checkbox"> Retain</label>
-          <span class="grow"></span>
-          <button id="p-clear" class="btn danger" type="button" title="Publishes an empty retained message, which deletes the retained value on the broker">Clear retained</button>
-          <button class="btn primary" type="submit">Publish</button>
+      <div id="panel-topic" class="panel" role="tabpanel" aria-labelledby="tab-topic">
+        <div id="detail-empty" class="empty">Select a topic to see its value and watch new messages arrive.</div>
+
+        <div id="detail" hidden>
+          <div class="topic-head">
+            <h1 id="d-topic" class="mono"></h1>
+            <button id="d-compare" class="btn small" type="button" title="Add this topic to the comparison ( c )">+ Compare</button>
+            <button id="d-copy" class="btn small" type="button">Copy topic</button>
+          </div>
+
+          <dl class="facts">
+            <div><dt>Messages</dt><dd id="d-count">0</dd></div>
+            <div><dt>Last received</dt><dd id="d-last">-</dd></div>
+            <div><dt>Interval</dt><dd id="d-interval">-</dd></div>
+            <div><dt>Size</dt><dd id="d-size">-</dd></div>
+            <div><dt>QoS</dt><dd id="d-qos">-</dd></div>
+            <div><dt>Retained</dt><dd id="d-retain">-</dd></div>
+          </dl>
+
+          <div class="section-head">
+            <h2 id="d-value-title">Latest value</h2>
+            <button id="d-live" class="btn small" type="button" hidden>Back to live</button>
+            <button id="d-copy-value" class="btn small" type="button">Copy value</button>
+          </div>
+          <pre id="d-value" class="value mono" tabindex="0"></pre>
+          <p id="d-props" class="muted mono" hidden></p>
+
+          <div class="section-head">
+            <h2>History</h2>
+            <span class="muted">recorded while this topic is open, newest first</span>
+          </div>
+          <ol id="d-history" class="history mono"></ol>
         </div>
-      </form>
+
+        <form id="publish" class="publish">
+          <h2>Publish</h2>
+          <label for="p-topic">Topic</label>
+          <input id="p-topic" class="mono" type="text" autocomplete="off" spellcheck="false" required>
+          <label for="p-payload">Payload</label>
+          <textarea id="p-payload" class="mono" rows="4" spellcheck="false"></textarea>
+          <div class="publish-row">
+            <label for="p-qos">QoS</label>
+            <select id="p-qos">
+              <option value="0">0</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+            </select>
+            <label class="check"><input id="p-retain" type="checkbox"> Retain</label>
+            <span class="grow"></span>
+            <button id="p-clear" class="btn danger" type="button" title="Publishes an empty retained message, which deletes the retained value on the broker">Clear retained</button>
+            <button class="btn primary" type="submit">Publish</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="panel-compare" class="panel compare-panel" role="tabpanel" aria-labelledby="tab-compare" hidden>
+        <div class="compare-head">
+          <form id="c-add" class="c-add">
+            <label class="sr-only" for="c-device">Add device</label>
+            <input id="c-device" class="mono" type="text" placeholder="Add device: serial number or full topic" autocomplete="off" spellcheck="false">
+            <button class="btn small" type="submit">Add</button>
+          </form>
+          <label class="check"><input id="c-diff" type="checkbox"> Only differences</label>
+          <span class="grow"></span>
+          <button id="c-clear" class="btn small danger" type="button" title="Remove all topics from the comparison">Clear</button>
+        </div>
+        <div id="c-empty" class="empty">No topics to compare yet. Select a topic and press <b>+ Compare</b>, or press <kbd>c</kbd> in the tree.</div>
+        <div id="c-wrap" class="compare-wrap" hidden>
+          <table id="c-table" class="compare mono">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
   </main>
 
