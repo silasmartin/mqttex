@@ -3,22 +3,28 @@
 
 const PAYLOAD = '(payload)';
 const TRUNCATED = '(truncated)';
+// Longest value shown in a cell. A longer one is cut and ends with a hash of
+// the whole text, so values that only differ further in still mark their row.
+const CELL_MAX = 200;
 
-// Turns a payload into field path -> text. Objects become a.b.c, arrays a[0].
-// Anything that is not a JSON object or array is one field, "(payload)".
+// Turns a payload into field path -> text. Objects become a.b.c, arrays a[0];
+// a key that would be ambiguous in a path is quoted instead: a["b.c"], [""].
+// Strings keep their JSON quotes so that "1" and 1 or "null" and null differ,
+// and numbers keep the digits that were sent. Anything that is not a JSON
+// object or array is one field, "(payload)".
 export function flatten(text, trunc = false) {
   const out = new Map();
   let root;
   // A cut-off payload never parses, and a half document would be misleading.
   if (!trunc && /^\s*[[{]/.test(text)) {
     try {
-      root = JSON.parse(text);
+      root = parse(text);
     } catch {
       root = undefined;
     }
   }
   if (root === undefined || root === null || typeof root !== 'object') {
-    out.set(PAYLOAD, text);
+    out.set(PAYLOAD, cell(text));
   } else {
     walk(root, '', out);
   }
@@ -26,9 +32,26 @@ export function flatten(text, trunc = false) {
   return out;
 }
 
+// A number as written in the payload.
+class Num {
+  constructor(source) {
+    this.source = source;
+  }
+}
+
+// JSON.parse alone rounds integers beyond 2^53 and turns 1.0 into 1, so
+// numbers are taken from the source text where the engine provides it.
+function parse(text) {
+  return JSON.parse(text, (_key, value, ctx) => (typeof value === 'number' && ctx?.source !== undefined ? new Num(ctx.source) : value));
+}
+
 function walk(v, path, out) {
+  if (v instanceof Num) {
+    out.set(path, v.source);
+    return;
+  }
   if (v !== null && typeof v === 'object') {
-    const entries = Array.isArray(v) ? v.map((x, i) => [`${path}[${i}]`, x]) : Object.keys(v).map((k) => [path ? `${path}.${k}` : k, v[k]]);
+    const entries = Array.isArray(v) ? v.map((x, i) => [`${path}[${i}]`, x]) : Object.keys(v).map((k) => [path + step(k, path), v[k]]);
     if (entries.length === 0) {
       out.set(path || PAYLOAD, Array.isArray(v) ? '[]' : '{}');
       return;
@@ -36,7 +59,32 @@ function walk(v, path, out) {
     for (const [p, x] of entries) walk(x, p, out);
     return;
   }
-  out.set(path, typeof v === 'string' ? v : String(v));
+  out.set(path, cell(typeof v === 'string' ? JSON.stringify(v) : String(v)));
+}
+
+// The path step for an object key: .key, or ["key"] when the key is empty or
+// contains a character of the path syntax, so no two fields share a path.
+function step(key, path) {
+  if (key !== '' && !/[.[\]"]/.test(key)) return path ? `.${key}` : key;
+  return `[${JSON.stringify(key)}]`;
+}
+
+function cell(text) {
+  if (text.length <= CELL_MAX) return text;
+  let end = CELL_MAX;
+  if (/[\uD800-\uDBFF]/.test(text[end - 1])) end--; // keep surrogate pairs whole
+  return `${text.slice(0, end)} ... (${text.length} characters, #${digest(text)})`;
+}
+
+// Short hash of a text (32-bit FNV-1a), to tell long values apart without
+// showing them.
+export function digest(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
 }
 
 // Short column titles: the topic segments all names share at the start and at
@@ -92,39 +140,48 @@ export function buildRows(columns) {
   });
 }
 
-// Builds the topic of another device from an existing one: the label segment
-// (see columnLabels) is replaced by newValue. A value containing "/" is taken
-// as a complete topic. With a single column the label is the whole topic, so
-// the segment is guessed: same length as newValue first, then the longest
-// segment that contains a digit. Returns null when nothing fits.
-export function substituteDevice(templateName, labelSegment, newValue) {
-  const value = newValue.trim();
-  if (value === '') return null;
-  if (value.includes('/')) return value;
-  const parts = templateName.split('/');
-
-  if (labelSegment && labelSegment !== templateName) {
-    const label = labelSegment.split('/');
-    for (let i = 0; i + label.length <= parts.length; i++) {
-      if (label.every((s, j) => parts[i + j] === s)) {
-        return [...parts.slice(0, i), value, ...parts.slice(i + label.length)].join('/');
-      }
-    }
+// The topics another device most likely uses, best guess first: one segment
+// of a compared topic is replaced by value. A value containing "/" is taken
+// as a complete topic. Every guess is a whole topic, so the caller can take
+// the first one that exists on the broker.
+//
+// Segments in which compared topics of the same depth differ come first,
+// since that is where the device sits (/topic/SN1/V0 next to /topic/SN2/V0).
+// After them come segments that look like value: ones with a digit if value
+// has one, otherwise ones of the same length. Within each group a longer
+// shared start with value ranks higher (SN10 replaces SN1, not V0), then the
+// same length, then the longer segment.
+export function deviceTopics(names, value) {
+  const v = value.trim();
+  if (v === '') return [];
+  if (v.includes('/')) return [v];
+  const parts = names.map((n) => n.split('/'));
+  const out = new Set();
+  const add = (p, keep) => {
+    const at = [];
+    p.forEach((s, i) => {
+      if (keep(s, i)) at.push(i);
+    });
+    for (const i of rank(p, at, v)) out.add([...p.slice(0, i), v, ...p.slice(i + 1)].join('/'));
+  };
+  for (const p of parts) {
+    const peers = parts.filter((q) => q !== p && q.length === p.length);
+    add(p, (s, i) => peers.some((q) => q[i] !== s));
   }
+  const digit = /\d/.test(v);
+  for (const p of parts) add(p, (s) => s !== '' && (digit ? /\d/.test(s) : s.length === v.length));
+  return [...out];
+}
 
-  let best = -1;
-  let bestScore = 0;
-  parts.forEach((s, i) => {
-    if (s === '') return;
-    const digit = /\d/.test(s);
-    if (s.length !== value.length && !digit) return;
-    const score = (s.length === value.length && digit ? 2000 : s.length === value.length ? 1000 : 0) + s.length;
-    if (score > bestScore) {
-      best = i;
-      bestScore = score;
-    }
-  });
-  if (best < 0) return null;
-  parts[best] = value;
-  return parts.join('/');
+function rank(parts, at, value) {
+  const v = value.toLowerCase();
+  const score = (i) => {
+    const s = parts[i].toLowerCase();
+    let shared = 0;
+    while (shared < s.length && s[shared] === v[shared]) shared++;
+    return [shared, s.length === v.length ? 1 : 0, s.length];
+  };
+  const scored = at.map((i) => ({ i, s: score(i) }));
+  scored.sort((a, b) => b.s[0] - a.s[0] || b.s[1] - a.s[1] || b.s[2] - a.s[2]);
+  return scored.map((x) => x.i);
 }

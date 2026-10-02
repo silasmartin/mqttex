@@ -27,6 +27,18 @@ test('a topic can also be a folder', () => {
   assert.deepEqual(labels(tree), ['a', '  b']);
 });
 
+test('idOf finds topics by name, folders and unknown names give -1', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/topic/SN1', 'a', 'a/b', 'x//y']);
+  assert.equal(tree.idOf('/topic/SN1'), 0);
+  assert.equal(tree.idOf('a'), 1);
+  assert.equal(tree.idOf('a/b'), 2);
+  assert.equal(tree.idOf('x//y'), 3);
+  assert.equal(tree.idOf('/topic'), -1); // a folder only
+  assert.equal(tree.idOf('/topic/SN2'), -1);
+  assert.equal(tree.idOf('x/y'), -1);
+});
+
 test('counts propagate as deltas to every ancestor', () => {
   const tree = new TopicTree();
   tree.addTopics(0, ['/topic/SN1', '/topic/SN2']);

@@ -78,6 +78,16 @@ export class TopicTree {
     this._rows = null;
   }
 
+  // Id of a topic by its full name, -1 if the server has not sent it (yet).
+  idOf(name) {
+    let node = this.root;
+    for (const part of name.split('/')) {
+      node = node.map && node.map.get(part);
+      if (!node) return -1;
+    }
+    return node.id;
+  }
+
   // pairs is a flat Uint32Array of (id, count). Returns the number of topics updated.
   applyCounts(pairs, now) {
     let updated = 0;

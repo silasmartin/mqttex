@@ -54,15 +54,16 @@ Subscriptions are MQTT topic filters: `#` matches all remaining levels, `+` matc
 To see several devices next to each other, add their topics to the comparison: select a topic and press **+ Compare**, or press `c` on a topic in the tree. Topics in the comparison carry a `cmp` badge in the tree. The **Compare** tab shows them as a table:
 
 - one column per topic, titled by the part of the topic that differs (for `/topic/SN1/V0/post/json` and `/topic/SN2/V0/post/json` that is `SN1` and `SN2`), with the age of its last message
-- one row per JSON field (`a.b.c`, arrays as `a[0]`); payloads that are not JSON form a single `(payload)` row
-- rows whose values differ are highlighted, changed values flash, missing fields show `–`
+- one row per JSON field (`a.b.c`, arrays as `a[0]`, keys with a dot or bracket quoted as `a["b.c"]`); payloads that are not JSON form a single `(payload)` row
+- strings keep their quotes and numbers the digits that were sent, so `"21"` next to `21` counts as a difference
+- rows whose values differ are highlighted, changed values flash, missing fields show `-`
 - **Only differences** hides the rows that are equal everywhere, × removes a column, **Clear** empties the list
 
 With a filter active, **Compare matches** next to the filter adds all matching topics at once. Several serial numbers work as comma-separated alternatives (`SN1, SN2, SN3 post/json`), and a pasted list with one serial number per line is turned into such a filter. Topics beyond the limit of 32 are skipped with a notice.
 
-**Add device** takes a serial number and builds the topic from the first column by swapping the device part, so you do not have to find each device in the tree. A full topic works as well. Up to 32 topics can be compared; the list is kept in the browser across reloads.
+**Add device** takes a serial number and builds the topic from the compared ones by swapping the device part, so you do not have to find each device in the tree. The device part is the segment in which the compared topics differ, or, with a single topic, the segment that looks most like the serial number; of these guesses the first topic the broker has is taken. A full topic works as well. Up to 32 topics can be compared; the list is kept in the browser across reloads.
 
-The comparison gets the full payload of each topic (up to 64 KB), independent of the shortened previews in the tree.
+While the Compare tab is open, it gets the full payload of each topic (up to 64 KB), independent of the shortened previews in the tree. Values longer than 200 characters are cut in their cell and end with a hash, so values that only differ further in still count as different; binary payloads show their size and a hash.
 
 ## How it handles the load
 

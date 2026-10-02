@@ -1,5 +1,5 @@
 import { TopicTree } from './tree.js';
-import { flatten, columnLabels, buildRows, substituteDevice } from './compare.js';
+import { flatten, digest, columnLabels, buildRows, deviceTopics } from './compare.js';
 
 const ROW_H = 24;
 const OVERSCAN = 6;
@@ -58,11 +58,11 @@ let shownN = null; // entry currently rendered in the value box
 // Compared topics are kept by name: ids are only valid within one epoch.
 const COMPARE_KEY = 'mqttex.compare';
 let compareNames = loadCompare();
-const nameToId = new Map();
 const compareValues = new Map(); // topic id -> latest message
 let compareIds = new Set(); // resolved ids of compareNames
-let lastCompareKey = null; // ids last sent to the server
-let compareDirty = true; // the table has to be rebuilt
+let resolvedKey = null; // compareIds as last resolved, to notice changes
+let sentCompareKey = ''; // ids the server streams, none while the table is hidden
+let compareDirty = true; // the table has to be updated
 let activeTab = 'topic';
 
 // ---------------------------------------------------------------- toasts
@@ -148,29 +148,32 @@ function resetClient() {
   rateSamples = [];
   cursor = null;
   lastWatchKey = '';
-  nameToId.clear();
   compareValues.clear();
   compareIds = new Set();
-  lastCompareKey = null;
+  resolvedKey = null;
+  sentCompareKey = ''; // the server dropped the list as well
+  headKey = null; // new rows, so values of the old epoch do not flash
   compareDirty = true;
   deselect();
   scheduleRender();
 }
 
 function onTick(t) {
-  const fresh = t.reset || t.epoch !== epoch;
-  if (fresh) {
+  if (t.reset || t.epoch !== epoch) {
     if (epoch !== 0) resetClient();
     epoch = t.epoch;
   }
-  if (t.names) {
-    tree.addTopics(t.first, t.names);
-    for (let i = 0; i < t.names.length; i++) nameToId.set(t.names[i], t.first + i);
-  }
-  // A reset tick can still carry values for ids of the old epoch.
-  if (t.compare && !fresh) {
+  if (t.names) tree.addTopics(t.first, t.names);
+  if (t.compare) {
     for (const m of t.compare) {
       if (!compareIds.has(m.id)) continue;
+      // Devices often send the same payload again. That only moves the age in
+      // the column header, which is read from compareValues every second.
+      const old = compareValues.get(m.id);
+      if (old && old.s === m.s && old.b === m.b && old.size === m.size && old.trunc === m.trunc) {
+        old.ts = m.ts;
+        continue;
+      }
       compareValues.set(m.id, m);
       compareDirty = true;
     }
@@ -654,22 +657,29 @@ function saveCompare() {
   }
 }
 
-// Sends the resolved ids whenever they change: after edits, after a reset and
-// when the names of stored topics arrive. Names the server has not delivered
-// yet stay out until they show up in tick.names.
+// Resolves the names to ids whenever that can change: after edits, after a
+// reset and when the names of stored topics arrive. Names the server has not
+// delivered yet stay out until they show up in tick.names. Payloads are only
+// streamed while the table is on screen; the tree badge and the tab title
+// need the names alone.
 function syncCompare() {
+  if (epoch === 0) return;
   const ids = [];
   for (const name of compareNames) {
-    const id = nameToId.get(name);
-    if (id !== undefined && ids.length < MAX_COMPARED) ids.push(id);
+    const id = tree.idOf(name);
+    if (id >= 0 && ids.length < MAX_COMPARED) ids.push(id);
   }
   const key = ids.join();
-  if (key === lastCompareKey || epoch === 0) return;
-  lastCompareKey = key;
-  compareIds = new Set(ids);
-  for (const id of compareValues.keys()) if (!compareIds.has(id)) compareValues.delete(id);
-  compareDirty = true;
-  send({ t: 'compare', epoch, ids });
+  if (key !== resolvedKey) {
+    resolvedKey = key;
+    compareIds = new Set(ids);
+    for (const id of compareValues.keys()) if (!compareIds.has(id)) compareValues.delete(id);
+    compareDirty = true;
+  }
+  const streamed = activeTab === 'compare' ? ids : [];
+  if (streamed.join() === sentCompareKey) return;
+  sentCompareKey = streamed.join();
+  send({ t: 'compare', epoch, ids: streamed });
 }
 
 function setCompare(names) {
@@ -707,30 +717,41 @@ function showTab(tab) {
   $('tab-compare').setAttribute('aria-selected', String(tab === 'compare'));
   $('panel-topic').hidden = tab !== 'topic';
   $('panel-compare').hidden = tab !== 'compare';
-  // Changes that happened while the table was hidden should not all flash.
-  shownCells = new Map();
+  // Values that changed while the table was hidden arrive right after the
+  // switch; they should not all flash at once.
+  quietUntil = performance.now() + 1000;
   compareDirty = true;
+  syncCompare();
   scheduleRender();
 }
 $('tab-topic').addEventListener('click', () => showTab('topic'));
 $('tab-compare').addEventListener('click', () => showTab('compare'));
 
 const flatCache = new WeakMap(); // message -> fields, so a payload is parsed once
-let shownCells = new Map(); // topic + field -> value last rendered, to flash changes
+let headKey = null; // compareNames the header row was built for
+let rowEls = new Map(); // field path -> { tr, cells }, kept while the columns stay
 let ageCells = [];
+let quietUntil = 0; // changed cells do not flash before this time, see showTab
+const emptyRow = document.createElement('tr');
+const emptyCell = emptyRow.appendChild(document.createElement('td'));
+emptyCell.className = 'missing';
 
 function fieldsOf(m) {
   let f = flatCache.get(m);
   if (!f) {
-    f = flatten(m.size === 0 ? '(empty payload)' : payloadText(m), m.trunc);
+    let text = m.s;
+    if (m.size === 0) text = '(empty payload)';
+    // Binary payloads are only told apart, like the tree only names their size.
+    else if (text === undefined) text = `binary, ${formatBytes(m.size)}, #${digest(m.b ?? '')}`;
+    f = flatten(text, m.trunc);
     flatCache.set(m, f);
   }
   return f;
 }
 
 function ageText(name, now) {
-  const id = nameToId.get(name);
-  if (id === undefined) return 'not seen yet';
+  const id = tree.idOf(name);
+  if (id < 0) return 'not seen yet';
   const m = compareValues.get(id);
   if (!m) return 'waiting for data';
   const ms = Math.max(0, now - m.ts);
@@ -745,92 +766,140 @@ function renderCompare() {
   const empty = compareNames.length === 0;
   $('c-empty').hidden = !empty;
   $('c-wrap').hidden = empty;
-  // Rebuilding the table on every tick would be wasteful: only new values or
-  // a changed column list mark it dirty. The ages refresh every second.
+  // Only new payloads, a changed column list or the filter mark the table
+  // dirty, and then only the cells that changed are touched. The ages
+  // refresh every second.
   if (compareDirty) {
     compareDirty = false;
-    buildCompareTable();
+    updateCompareTable();
   }
   const now = Date.now();
   for (const { el, name } of ageCells) setText(el, ageText(name, now));
 }
 
-function buildCompareTable() {
+function element(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+// The header changes only with the column list, so its buttons stay put
+// while values stream in.
+function buildCompareHead() {
   const labels = columnLabels(compareNames);
-  const columns = compareNames.map((name) => {
-    const id = nameToId.get(name);
-    const m = id === undefined ? undefined : compareValues.get(id);
-    return m ? fieldsOf(m) : null;
-  });
-  let rows = buildRows(columns);
-  const onlyDiffs = $('c-diff').checked;
-  if (onlyDiffs) rows = rows.filter((r) => r.differs);
-
-  const el = (tag, cls, text) => {
-    const e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
-    return e;
-  };
-
   ageCells = [];
-  const head = el('tr');
-  head.append(el('th', '', 'Field'));
+  const head = element('tr');
+  head.append(element('th', '', 'Field'));
   compareNames.forEach((name, i) => {
-    const th = el('th');
+    const th = element('th');
     th.title = name;
-    const top = el('div', 'c-col');
-    const remove = el('button', 'c-remove', '×');
+    const top = element('div', 'c-col');
+    const remove = element('button', 'c-remove', '×');
     remove.type = 'button';
     remove.dataset.name = name;
     remove.title = 'Remove from the comparison';
     remove.setAttribute('aria-label', `Remove ${name} from the comparison`);
-    top.append(el('span', 'c-label', labels[i]), remove);
-    const age = el('span', 'c-age');
+    top.append(element('span', 'c-label', labels[i]), remove);
+    const age = element('span', 'c-age');
     ageCells.push({ el: age, name });
     th.append(top, age);
     head.append(th);
   });
+  return head;
+}
 
-  const next = new Map();
-  columns.forEach((col, i) => {
-    if (col) for (const [path, v] of col) next.set(`${compareNames[i]}\n${path}`, v);
-  });
-
-  const body = [];
-  for (const row of rows) {
-    const tr = el('tr', row.differs ? 'differs' : '');
-    const th = el('th', '', row.path);
-    th.scope = 'row';
-    tr.append(th);
-    row.values.forEach((v, i) => {
-      if (v === undefined) {
-        tr.append(el('td', 'missing', '–'));
-        return;
-      }
-      const prev = shownCells.get(`${compareNames[i]}\n${row.path}`);
-      tr.append(el('td', prev !== undefined && prev !== v ? 'flash' : '', v));
-    });
-    body.push(tr);
-  }
-  if (body.length === 0) {
-    const td = el('td', 'missing', columns.some(Boolean) && onlyDiffs ? 'No differences.' : 'Waiting for messages on these topics.');
-    td.colSpan = compareNames.length + 1;
-    const tr = el('tr');
+function newCompareRow(path) {
+  const tr = element('tr');
+  const th = element('th', '', path);
+  th.scope = 'row';
+  tr.append(th);
+  const cells = compareNames.map(() => {
+    const td = element('td');
+    td._v = null; // nothing shown yet
     tr.append(td);
-    body.push(tr);
-  }
-  shownCells = next;
+    return td;
+  });
+  return { tr, cells };
+}
 
+// Returns true when the cell showed another value before, which makes it flash.
+function fillCell(td, v) {
+  if (td._v === v) return false;
+  const changed = typeof td._v === 'string' && v !== undefined;
+  td._v = v;
+  td.textContent = v ?? '-';
+  td.classList.toggle('missing', v === undefined);
+  return changed;
+}
+
+function updateCompareTable() {
   const table = $('c-table');
-  table.tHead.replaceChildren(head);
-  table.tBodies[0].replaceChildren(...body);
+  const body = table.tBodies[0];
+  const key = compareNames.join('\n');
+  if (key !== headKey) {
+    headKey = key;
+    rowEls = new Map();
+    table.tHead.replaceChildren(buildCompareHead());
+    body.replaceChildren();
+    emptyCell.colSpan = compareNames.length + 1;
+  }
+
+  const columns = compareNames.map((name) => {
+    const m = compareValues.get(tree.idOf(name));
+    return m ? fieldsOf(m) : null;
+  });
+  let rows = buildRows(columns);
+  if (rowEls.size > rows.length) {
+    const live = new Set(rows.map((r) => r.path));
+    for (const path of rowEls.keys()) if (!live.has(path)) rowEls.delete(path);
+  }
+  const onlyDiffs = $('c-diff').checked;
+  if (onlyDiffs) rows = rows.filter((r) => r.differs);
+
+  const flash = performance.now() >= quietUntil;
+  const changed = [];
+  const trs = rows.map((row) => {
+    let r = rowEls.get(row.path);
+    if (!r) {
+      r = newCompareRow(row.path);
+      rowEls.set(row.path, r);
+    }
+    r.tr.classList.toggle('differs', row.differs);
+    row.values.forEach((v, i) => {
+      if (fillCell(r.cells[i], v) && flash) changed.push(r.cells[i]);
+    });
+    return r.tr;
+  });
+  if (trs.length === 0) {
+    emptyCell.textContent = columns.some(Boolean) && onlyDiffs ? 'No differences.' : 'Waiting for messages on these topics.';
+    trs.push(emptyRow);
+  }
+
+  // Rows that stay are not moved, so a text selection in them survives.
+  const keep = new Set(trs);
+  for (const tr of [...body.rows]) if (!keep.has(tr)) tr.remove();
+  let at = body.firstChild;
+  for (const tr of trs) {
+    if (tr === at) at = at.nextSibling;
+    else body.insertBefore(tr, at);
+  }
+
+  if (changed.length > 0) {
+    for (const td of changed) td.classList.remove('flash');
+    void body.offsetWidth; // restarts the animation in cells that are still flashing
+    for (const td of changed) td.classList.add('flash');
+  }
 }
 
 $('c-table').addEventListener('click', (ev) => {
   const btn = ev.target.closest('.c-remove');
   if (btn) setCompare(compareNames.filter((n) => n !== btn.dataset.name));
 });
+// A row hidden by "Only differences" would flash again when it comes back.
+for (const type of ['animationend', 'animationcancel']) {
+  $('c-table').addEventListener(type, (ev) => ev.target.classList.remove('flash'));
+}
 
 $('c-diff').addEventListener('change', () => {
   compareDirty = true;
@@ -843,24 +912,25 @@ $('c-add').addEventListener('submit', (ev) => {
   ev.preventDefault();
   const value = $('c-device').value.trim();
   if (!value) return;
-  let name = value.includes('/') ? value : null;
-  if (!name) {
-    if (compareNames.length === 0) {
-      toast('error', 'Could not add the device: add a first topic with + Compare or c in the tree, or enter a full topic.');
-      return;
-    }
-    name = substituteDevice(compareNames[0], columnLabels(compareNames)[0], value);
-    if (!name) {
-      toast('error', `Could not tell which part of ${compareNames[0]} is the device. Enter the full topic instead.`);
-      return;
-    }
+  const full = value.includes('/');
+  if (!full && compareNames.length === 0) {
+    toast('error', 'Could not add the device: add a first topic with + Compare or c in the tree, or enter a full topic.');
+    return;
   }
+  const guesses = deviceTopics(compareNames, value);
+  if (guesses.length === 0) {
+    toast('error', `Could not tell which part of the compared topics is the device ${value}. Enter the full topic instead.`);
+    return;
+  }
+  // Several segments can pass for the device; the topic the broker has decides.
+  const name = guesses.find((n) => tree.idOf(n) >= 0) ?? guesses[0];
   if (compareNames.includes(name)) {
     toast('error', `${name} is already in the comparison.`);
     return;
   }
-  if (!nameToId.has(name)) {
-    toast('error', `Could not add ${name}: no message was received on this topic so far.`);
+  if (tree.idOf(name) < 0) {
+    if (full) toast('error', `Could not add ${name}: no message was received on this topic so far.`);
+    else toast('error', `Could not add ${value}: no message was received on ${name} or another guessed topic so far. Enter the full topic instead.`);
     return;
   }
   if (compareNames.length >= MAX_COMPARED) {

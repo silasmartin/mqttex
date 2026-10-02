@@ -63,6 +63,15 @@ type wirePreview struct {
 	Retain bool  `json:"retain,omitempty"`
 }
 
+func wirePreviews(ps []store.Preview, max int) []wirePreview {
+	var out []wirePreview
+	for _, p := range ps {
+		out = append(out, wirePreview{ID: p.ID, wirePayload: encodePayload(p.Msg.Payload, max),
+			Time: p.Msg.Time.UnixMilli(), Retain: p.Msg.Retain})
+	}
+	return out
+}
+
 type wireMessage struct {
 	N uint32 `json:"n"`
 	wirePayload
@@ -96,14 +105,10 @@ type clientMsg struct {
 }
 
 type wsClient struct {
-	mu         sync.Mutex
-	cur        store.Cursor
-	watch      []uint32
-	watchAll   bool
-	compare    []uint32
-	compareAll bool
-	selected   int64
-	selEpoch   uint64
+	mu       sync.Mutex
+	cur      store.Cursor
+	want     store.Want // want.Selected is set while the store holds the selection
+	selEpoch uint64     // epoch in which want.Selected was selected
 }
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
@@ -118,11 +123,11 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	c := &wsClient{selected: -1}
+	c := &wsClient{}
 	defer func() {
 		c.mu.Lock()
-		if c.selected >= 0 {
-			s.store.Release(c.selEpoch, uint32(c.selected))
+		if c.want.Selected != nil {
+			s.store.Release(c.selEpoch, *c.want.Selected)
 		}
 		c.mu.Unlock()
 	}()
@@ -168,7 +173,7 @@ func (s *Server) handleClientMsg(c *wsClient, m clientMsg) {
 		if len(m.IDs) > maxWatchedRows {
 			m.IDs = m.IDs[:maxWatchedRows]
 		}
-		c.watch, c.watchAll = m.IDs, true
+		c.want.Watch, c.want.WatchAll = m.IDs, true
 	case "compare":
 		if m.Epoch != c.cur.Epoch {
 			return
@@ -176,14 +181,14 @@ func (s *Server) handleClientMsg(c *wsClient, m clientMsg) {
 		if len(m.IDs) > maxCompared {
 			m.IDs = m.IDs[:maxCompared]
 		}
-		c.compare, c.compareAll = m.IDs, true
+		c.want.Compare, c.want.CompareAll = m.IDs, true
 	case "select":
-		if c.selected >= 0 {
-			s.store.Release(c.selEpoch, uint32(c.selected))
-			c.selected = -1
+		if c.want.Selected != nil {
+			s.store.Release(c.selEpoch, *c.want.Selected)
+			c.want.Selected = nil
 		}
-		if m.ID >= 0 && s.store.Select(m.Epoch, uint32(m.ID)) {
-			c.selected, c.selEpoch = m.ID, m.Epoch
+		if id := uint32(m.ID); m.ID >= 0 && s.store.Select(m.Epoch, id) {
+			c.want.Selected, c.selEpoch = &id, m.Epoch
 		}
 		c.cur.HistN = 0
 	}
@@ -193,26 +198,21 @@ func (s *Server) handleClientMsg(c *wsClient, m clientMsg) {
 // counts frame so the browser always knows an id before it sees its count.
 func (s *Server) sendUpdate(ctx context.Context, conn *websocket.Conn, c *wsClient) (more bool, err error) {
 	c.mu.Lock()
-	u := s.store.Poll(&c.cur, store.Want{Watch: c.watch, WatchAll: c.watchAll, Selected: c.selected,
-		Compare: c.compare, CompareAll: c.compareAll})
-	c.watchAll, c.compareAll = false, false
+	u := s.store.Poll(&c.cur, c.want)
+	c.want.WatchAll, c.want.CompareAll = false, false
 	if u.Reset {
 		// Ids from before the reset mean nothing now.
-		c.watch, c.compare, c.selected = nil, nil, -1
+		c.want = store.Want{}
 	}
-	selected := c.selected
+	selected := int64(-1)
+	if c.want.Selected != nil {
+		selected = int64(*c.want.Selected)
+	}
 	c.mu.Unlock()
 
 	tick := wireTick{Type: "tick", Reset: u.Reset, Epoch: u.Epoch, First: u.FirstID, Names: u.Names,
+		Previews: wirePreviews(u.Previews, previewBytes), Compare: wirePreviews(u.Compared, compareBytes),
 		Selected: selected, Stats: u.Stats, Status: s.broker.Status()}
-	for _, p := range u.Previews {
-		tick.Previews = append(tick.Previews, wirePreview{ID: p.ID, wirePayload: encodePayload(p.Msg.Payload, previewBytes),
-			Time: p.Msg.Time.UnixMilli(), Retain: p.Msg.Retain})
-	}
-	for _, p := range u.Compared {
-		tick.Compare = append(tick.Compare, wirePreview{ID: p.ID, wirePayload: encodePayload(p.Msg.Payload, compareBytes),
-			Time: p.Msg.Time.UnixMilli(), Retain: p.Msg.Retain})
-	}
 	for _, m := range u.History {
 		tick.History = append(tick.History, wireMessage{N: m.N, wirePayload: encodePayload(m.Payload, historyBytes),
 			Time: m.Time.UnixMilli(), QoS: m.QoS, Retain: m.Retain, ContentType: m.ContentType, UserProps: m.UserProps})
