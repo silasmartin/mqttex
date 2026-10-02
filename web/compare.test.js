@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { flatten, digest, columnLabels, buildRows, deviceTopics } from './compare.js';
+import { flatten, digest, columnLabels, buildRows, deviceTopics, pickTopic, rowLimit } from './compare.js';
 
 const obj = (m) => Object.fromEntries(m);
 
@@ -36,6 +36,7 @@ test('flatten: long values are cut, the hash keeps them apart', () => {
   const raw = flatten(`not json ${long}`).get('(payload)');
   assert.ok(raw.endsWith(`(309 characters, #${digest(`not json ${long}`)})`), raw);
   assert.equal(flatten('{"s":"short"}').get('s'), '"short"');
+  assert.ok(flatten(`{"n":${'9'.repeat(400)}}`).get('n').endsWith(`(400 characters, #${digest('9'.repeat(400))})`));
 });
 
 test('digest: stable 8-digit hex', () => {
@@ -117,6 +118,28 @@ test('deviceTopics: single topic, the guessed segment', () => {
   assert.equal(deviceTopics(u, 'SN9')[0], '/topic/SN9/V0/post/json');
   // Every candidate is offered, so the caller can pick the one that exists.
   assert.ok(deviceTopics(u, 'SN9').includes('/topic/A1B2C3D4/SN9/post/json'));
+});
+
+test('pickTopic: an existing topic that is not compared yet', () => {
+  const have = new Set(['/t/SN2/a', '/t/SN2/b', '/t/SN1/a']);
+  const exact = (n) => (have.has(n) ? n : undefined);
+  const lower = (n) => [...have].find((h) => h.toLowerCase() === n.toLowerCase());
+  const guesses = ['/t/SN2/a', '/t/SN1/SN2', '/t/SN2/b'];
+  assert.equal(pickTopic(guesses, [exact, lower], ['/t/SN1/a', '/t/SN2/a']), '/t/SN2/b');
+  // All existing ones compared: the first, so the caller says so.
+  assert.equal(pickTopic(guesses, [exact, lower], ['/t/SN2/a', '/t/SN2/b']), '/t/SN2/a');
+  // An exact name beats one that only matches ignoring case.
+  assert.equal(pickTopic(['/t/sn2/a', '/t/SN2/b'], [exact, lower], []), '/t/SN2/b');
+  // Only a case-insensitive match: the existing name is returned.
+  assert.equal(pickTopic(['/t/sn2/a'], [exact, lower], []), '/t/SN2/a');
+  // Nothing exists: the first guess.
+  assert.equal(pickTopic(['/t/SN9/a', '/t/SN1/SN9'], [exact, lower], []), '/t/SN9/a');
+});
+
+test('rowLimit: about 10 000 cells whatever the column count', () => {
+  assert.equal(rowLimit(0), 10_000);
+  assert.equal(rowLimit(1), 10_000);
+  assert.equal(rowLimit(32), 312);
 });
 
 test('deviceTopics: full topic, empty input, nothing that fits', () => {

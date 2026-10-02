@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TopicTree } from './tree.js';
+import { TopicTree, filterPaste } from './tree.js';
 
 const labels = (tree) => tree.rows().map((n) => `${'  '.repeat(n.depth)}${n.name || '(empty)'}`);
 
@@ -37,6 +37,37 @@ test('idOf finds topics by name, folders and unknown names give -1', () => {
   assert.equal(tree.idOf('/topic'), -1); // a folder only
   assert.equal(tree.idOf('/topic/SN2'), -1);
   assert.equal(tree.idOf('x/y'), -1);
+});
+
+test('idOfIgnoringCase: exact first, then a segment that only differs in case', () => {
+  const tree = new TopicTree();
+  tree.addTopics(0, ['/topic/SN7/V0', '/Topic/sn8/V0', '/topic/sn8/V1']);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN7/V0'), 0);
+  assert.equal(tree.idOfIgnoringCase('/topic/sn7/v0'), 0);
+  // /topic/sn8 exists exactly but has no V0 below it; /Topic/sn8/V0 does.
+  assert.equal(tree.idOfIgnoringCase('/topic/sn8/V0'), 1);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN8/v1'), 2);
+  assert.equal(tree.idOfIgnoringCase('/topic/SN9/V0'), -1);
+  assert.equal(tree.idOfIgnoringCase('/topic'), -1);
+});
+
+test('filterPaste: lines and spreadsheet cells become one term of alternatives', () => {
+  assert.equal(filterPaste('SN1', '', ''), null);
+  assert.equal(filterPaste('SN1\nSN2\n', '', ''), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\r\nSN2', '', ''), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\tok\nSN2\tok', '', ''), 'SN1, ok, SN2, ok');
+  assert.equal(filterPaste(' \n \n', '', ''), null);
+});
+
+test('filterPaste: kept apart from the text around it', () => {
+  assert.equal(filterPaste('SN1\nSN2', 'post/json', ''), ' SN1, SN2');
+  assert.equal(filterPaste('SN1\nSN2', '', 'post/json'), 'SN1, SN2 ');
+  assert.equal(filterPaste('SN1\nSN2', 'post/json ', ' x'), 'SN1, SN2');
+  assert.equal(filterPaste('SN1\nSN2', 'SN0,', ''), 'SN1, SN2');
+  const tree = new TopicTree();
+  tree.addTopics(0, ['d/SN1/ok', 'd/SN2/ok', 'd/SN3/ok']);
+  tree.setFilter(`d/ ${filterPaste('SN1\tok\nSN2\tok', 'd/', '').trim()}`);
+  assert.deepEqual(tree.matchingIds().map((id) => tree.names[id]), ['d/SN1/ok', 'd/SN2/ok', 'd/SN3/ok']);
 });
 
 test('counts propagate as deltas to every ancestor', () => {

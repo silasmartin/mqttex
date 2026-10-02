@@ -6,6 +6,9 @@ const TRUNCATED = '(truncated)';
 // Longest value shown in a cell. A longer one is cut and ends with a hash of
 // the whole text, so values that only differ further in still mark their row.
 const CELL_MAX = 200;
+// Value cells the table holds at most. Every array element is a row, so a
+// few large arrays across many columns would otherwise freeze the page.
+const MAX_CELLS = 10_000;
 
 // Turns a payload into field path -> text. Objects become a.b.c, arrays a[0];
 // a key that would be ambiguous in a path is quoted instead: a["b.c"], [""].
@@ -50,7 +53,7 @@ function parse(text) {
 
 function walk(v, path, out) {
   if (v instanceof Num) {
-    out.set(path, v.source);
+    out.set(path, cell(v.source));
     return;
   }
   if (v !== null && typeof v === 'object') {
@@ -71,6 +74,11 @@ function walk(v, path, out) {
 function step(key, path) {
   if (key !== '' && !/[.[\]"]/.test(key) && (path !== '' || key[0] !== '(')) return path ? `.${key}` : key;
   return `[${JSON.stringify(key)}]`;
+}
+
+// Rows the table shows for the given number of columns.
+export function rowLimit(columns) {
+  return Math.floor(MAX_CELLS / Math.max(1, columns));
 }
 
 function cell(text) {
@@ -175,6 +183,19 @@ export function deviceTopics(names, value) {
   const digit = /\d/.test(v);
   for (const p of parts) add(p, (s) => s !== '' && (digit ? /\d/.test(s) : s.length === v.length));
   return [...out];
+}
+
+// The topic Add device takes from the guesses of deviceTopics. lookups map a
+// guess to the name of an existing topic or undefined, best first (exact
+// name, then ignoring case). Of the guesses the first lookup finds, one that
+// is not compared yet wins; without any, the first guess is returned and the
+// caller reports it as unknown.
+export function pickTopic(guesses, lookups, compared) {
+  for (const lookup of lookups) {
+    const known = guesses.map(lookup).filter((name) => name !== undefined);
+    if (known.length > 0) return known.find((name) => !compared.includes(name)) ?? known[0];
+  }
+  return guesses[0];
 }
 
 function rank(parts, at, value) {

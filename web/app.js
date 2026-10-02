@@ -1,5 +1,6 @@
-import { TopicTree } from './tree.js';
-import { flatten, digest, columnLabels, buildRows, deviceTopics } from './compare.js';
+import { TopicTree, filterPaste } from './tree.js';
+import { flatten, digest, columnLabels, buildRows, deviceTopics, pickTopic, rowLimit } from './compare.js';
+import { formatBytes, formatInterval } from './format.js';
 
 const ROW_H = 24;
 const OVERSCAN = 6;
@@ -19,26 +20,6 @@ const compactFmt = new Intl.NumberFormat('en', { notation: 'compact', maximumFra
 const fullFmt = new Intl.NumberFormat('en');
 
 const compact = (n) => (n < 10_000 ? fullFmt.format(n) : compactFmt.format(n));
-
-function formatBytes(n) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`;
-}
-
-// Rounds before splitting, so 119.6 s is "2 min 0 s" and not "1 min 60 s".
-function formatInterval(ms) {
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 59_995) return `${(ms / 1000).toFixed(2)} s`;
-  const s = Math.round(ms / 1000);
-  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
-  const min = Math.round(ms / 60_000);
-  return `${Math.floor(min / 60)} h ${min % 60} min`;
-}
 
 // ---------------------------------------------------------------- state
 
@@ -450,17 +431,12 @@ $('filter').addEventListener('input', () => {
   clearTimeout(filterTimer);
   filterTimer = setTimeout(applyFilter, 100);
 });
-// A pasted column of serial numbers would lose its line breaks in the input
-// and run together, so they become the comma separator of the filter.
+// A pasted column of serial numbers becomes a list of alternatives, see filterPaste.
 $('filter').addEventListener('paste', (ev) => {
-  const text = ev.clipboardData?.getData('text') ?? '';
-  if (!/[\r\n]/.test(text)) return;
-  ev.preventDefault();
   const input = ev.target;
-  let list = text.trim().replace(/\s*[\r\n]\s*/g, ', ');
-  // The list stays a term of its own next to what is already typed.
-  if (/[^\s,]$/.test(input.value.slice(0, input.selectionStart))) list = ` ${list}`;
-  if (/^[^\s,]/.test(input.value.slice(input.selectionEnd))) list = `${list} `;
+  const list = filterPaste(ev.clipboardData?.getData('text') ?? '', input.value.slice(0, input.selectionStart), input.value.slice(input.selectionEnd));
+  if (list === null) return;
+  ev.preventDefault();
   input.setRangeText(list, input.selectionStart, input.selectionEnd, 'end');
   input.dispatchEvent(new Event('input', { bubbles: true }));
 });
@@ -742,6 +718,9 @@ let quietUntil = 0; // changed cells do not flash before this time, see showTab
 const emptyRow = document.createElement('tr');
 const emptyCell = emptyRow.appendChild(document.createElement('td'));
 emptyCell.className = 'missing';
+const cutRow = document.createElement('tr'); // says how many rows rowLimit left out
+const cutCell = cutRow.appendChild(document.createElement('td'));
+cutCell.className = 'missing';
 
 function fieldsOf(m) {
   let f = flatCache.get(m);
@@ -843,13 +822,15 @@ function fillCell(td, v) {
 function updateCompareTable() {
   const table = $('c-table');
   const body = table.tBodies[0];
-  const key = compareNames.join('\n');
+  // Topic names may contain any character, a newline included.
+  const key = JSON.stringify(compareNames);
   if (key !== headKey) {
     headKey = key;
     rowEls = new Map();
     table.tHead.replaceChildren(buildCompareHead());
     body.replaceChildren();
     emptyCell.colSpan = compareNames.length + 1;
+    cutCell.colSpan = compareNames.length + 1;
   }
 
   const columns = compareNames.map((name) => {
@@ -862,18 +843,24 @@ function updateCompareTable() {
   for (const path of rowEls.keys()) if (!live.has(path)) rowEls.delete(path);
   const onlyDiffs = $('c-diff').checked;
 
-  // Rows hidden by "Only differences" are filled as well, so they do not
-  // flash with old changes when they are shown again.
+  // Rows that are not shown (by "Only differences" or beyond the row limit)
+  // but exist from before are filled as well, so they do not flash with old
+  // changes when they are shown again. Others are created once they are.
   const flash = performance.now() >= quietUntil;
+  const limit = rowLimit(compareNames.length);
   const changed = [];
   const trs = [];
+  let cut = 0;
   for (const row of rows) {
+    const wanted = row.differs || !onlyDiffs;
+    const shown = wanted && trs.length < limit;
+    if (wanted && !shown) cut++;
     let r = rowEls.get(row.path);
     if (!r) {
+      if (!shown) continue;
       r = newCompareRow(row.path);
       rowEls.set(row.path, r);
     }
-    const shown = row.differs || !onlyDiffs;
     r.tr.classList.toggle('differs', row.differs);
     row.values.forEach((v, i) => {
       if (fillCell(r.cells[i], v) && flash && shown) changed.push(r.cells[i]);
@@ -884,10 +871,21 @@ function updateCompareTable() {
     emptyCell.textContent = columns.some(Boolean) && onlyDiffs ? 'No differences.' : 'Waiting for messages on these topics.';
     trs.push(emptyRow);
   }
+  if (cut > 0) {
+    const fields = `${fullFmt.format(cut)} more ${cut === 1 ? 'field is' : 'fields are'} not shown`;
+    cutCell.textContent = onlyDiffs ? `${fields}. Compare fewer topics to see them.` : `${fields}. Turn on Only differences or compare fewer topics to see them.`;
+    trs.push(cutRow);
+  }
 
   // Rows that stay are not moved, so a text selection in them survives.
   const keep = new Set(trs);
-  for (const tr of [...body.rows]) if (!keep.has(tr)) tr.remove();
+  for (const tr of [...body.rows]) {
+    if (keep.has(tr)) continue;
+    tr.remove();
+    // A removed row no longer reports the end of its animations to the
+    // table, so a flash still running would start over once it is back.
+    for (const td of tr.cells) td.classList.remove('flash');
+  }
   let at = body.firstChild;
   for (const tr of trs) {
     if (tr === at) at = at.nextSibling;
@@ -905,10 +903,8 @@ $('c-table').addEventListener('click', (ev) => {
   const btn = ev.target.closest('.c-remove');
   if (btn) setCompare(compareNames.filter((n) => n !== btn.dataset.name));
 });
-// A row hidden by "Only differences" would flash again when it comes back.
-for (const type of ['animationend', 'animationcancel']) {
-  $('c-table').addEventListener(type, (ev) => ev.target.classList.remove('flash'));
-}
+// A flashed cell would flash again whenever its row is put back into the table.
+$('c-table').addEventListener('animationend', (ev) => ev.target.classList.remove('flash'));
 
 $('c-diff').addEventListener('change', () => {
   compareDirty = true;
@@ -932,9 +928,14 @@ $('c-add').addEventListener('submit', (ev) => {
     return;
   }
   // Several segments can pass for the device; the topic the broker has
-  // decides, and one that is not compared yet wins over one that is.
-  const known = guesses.filter((n) => tree.idOf(n) >= 0);
-  const name = known.find((n) => !compareNames.includes(n)) ?? known[0] ?? guesses[0];
+  // decides. Topic names are case-sensitive and typed serial numbers often
+  // are not, so a topic that only differs in case is the second choice.
+  const exact = (n) => (tree.idOf(n) >= 0 ? n : undefined);
+  const loose = (n) => {
+    const id = tree.idOfIgnoringCase(n);
+    return id >= 0 ? tree.names[id] : undefined;
+  };
+  const name = pickTopic(guesses, [exact, loose], compareNames);
   if (compareNames.includes(name)) {
     toast('error', `${name} is already in the comparison.`);
     return;
