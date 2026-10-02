@@ -22,6 +22,8 @@ test('flatten: keys that look like path syntax are quoted, nothing collides', ()
   assert.deepEqual(obj(flatten('{"a.b":1,"a":{"b":2}}')), { '["a.b"]': '1', 'a.b': '2' });
   assert.deepEqual(obj(flatten('{"":{"x":1},"x":2}')), { '[""].x': '1', x: '2' });
   assert.deepEqual(obj(flatten('{"o":{"[0]":1,"q\\"":2},"o2":[3]}')), { 'o["[0]"]': '1', 'o["q\\""]': '2', 'o2[0]': '3' });
+  // Not the same as the (payload) row of a plain 1, nor of a nested key.
+  assert.deepEqual(obj(flatten('{"(payload)":1,"o":{"(x)":2}}')), { '["(payload)"]': '1', 'o.(x)': '2' });
 });
 
 test('flatten: long values are cut, the hash keeps them apart', () => {

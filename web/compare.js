@@ -10,8 +10,9 @@ const CELL_MAX = 200;
 // Turns a payload into field path -> text. Objects become a.b.c, arrays a[0];
 // a key that would be ambiguous in a path is quoted instead: a["b.c"], [""].
 // Strings keep their JSON quotes so that "1" and 1 or "null" and null differ,
-// and numbers keep the digits that were sent. Anything that is not a JSON
-// object or array is one field, "(payload)".
+// and numbers keep the digits that were sent where the engine allows it (see
+// parse). Anything that is not a JSON object or array is one field,
+// "(payload)".
 export function flatten(text, trunc = false) {
   const out = new Map();
   let root;
@@ -40,7 +41,9 @@ class Num {
 }
 
 // JSON.parse alone rounds integers beyond 2^53 and turns 1.0 into 1, so
-// numbers are taken from the source text where the engine provides it.
+// numbers are taken from the source text where the engine passes it to the
+// reviver. Older engines do not; there numbers are shown as JSON.parse reads
+// them.
 function parse(text) {
   return JSON.parse(text, (_key, value, ctx) => (typeof value === 'number' && ctx?.source !== undefined ? new Num(ctx.source) : value));
 }
@@ -62,10 +65,11 @@ function walk(v, path, out) {
   out.set(path, cell(typeof v === 'string' ? JSON.stringify(v) : String(v)));
 }
 
-// The path step for an object key: .key, or ["key"] when the key is empty or
-// contains a character of the path syntax, so no two fields share a path.
+// The path step for an object key: .key, or ["key"] when the key is empty,
+// contains a character of the path syntax or, at the top, starts like the
+// (payload) and (truncated) rows, so no two fields share a path.
 function step(key, path) {
-  if (key !== '' && !/[.[\]"]/.test(key)) return path ? `.${key}` : key;
+  if (key !== '' && !/[.[\]"]/.test(key) && (path !== '' || key[0] !== '(')) return path ? `.${key}` : key;
   return `[${JSON.stringify(key)}]`;
 }
 

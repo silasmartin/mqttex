@@ -30,11 +30,14 @@ function formatBytes(n) {
   return `${i === 0 ? n : n.toFixed(1)} ${units[i]}`;
 }
 
+// Rounds before splitting, so 119.6 s is "2 min 0 s" and not "1 min 60 s".
 function formatInterval(ms) {
   if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)} s`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`;
-  return `${Math.floor(ms / 3_600_000)} h ${Math.round((ms % 3_600_000) / 60_000)} min`;
+  if (ms < 59_995) return `${(ms / 1000).toFixed(2)} s`;
+  const s = Math.round(ms / 1000);
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  const min = Math.round(ms / 60_000);
+  return `${Math.floor(min / 60)} h ${min % 60} min`;
 }
 
 // ---------------------------------------------------------------- state
@@ -454,7 +457,11 @@ $('filter').addEventListener('paste', (ev) => {
   if (!/[\r\n]/.test(text)) return;
   ev.preventDefault();
   const input = ev.target;
-  input.setRangeText(text.trim().replace(/\s*[\r\n]\s*/g, ', '), input.selectionStart, input.selectionEnd, 'end');
+  let list = text.trim().replace(/\s*[\r\n]\s*/g, ', ');
+  // The list stays a term of its own next to what is already typed.
+  if (/[^\s,]$/.test(input.value.slice(0, input.selectionStart))) list = ` ${list}`;
+  if (/^[^\s,]/.test(input.value.slice(input.selectionEnd))) list = `${list} `;
+  input.setRangeText(list, input.selectionStart, input.selectionEnd, 'end');
   input.dispatchEvent(new Event('input', { bubbles: true }));
 });
 $('filter-compare').addEventListener('click', () => {
@@ -849,28 +856,30 @@ function updateCompareTable() {
     const m = compareValues.get(tree.idOf(name));
     return m ? fieldsOf(m) : null;
   });
-  let rows = buildRows(columns);
-  if (rowEls.size > rows.length) {
-    const live = new Set(rows.map((r) => r.path));
-    for (const path of rowEls.keys()) if (!live.has(path)) rowEls.delete(path);
-  }
+  const rows = buildRows(columns);
+  // A field that comes back later gets a new row, which does not flash.
+  const live = new Set(rows.map((r) => r.path));
+  for (const path of rowEls.keys()) if (!live.has(path)) rowEls.delete(path);
   const onlyDiffs = $('c-diff').checked;
-  if (onlyDiffs) rows = rows.filter((r) => r.differs);
 
+  // Rows hidden by "Only differences" are filled as well, so they do not
+  // flash with old changes when they are shown again.
   const flash = performance.now() >= quietUntil;
   const changed = [];
-  const trs = rows.map((row) => {
+  const trs = [];
+  for (const row of rows) {
     let r = rowEls.get(row.path);
     if (!r) {
       r = newCompareRow(row.path);
       rowEls.set(row.path, r);
     }
+    const shown = row.differs || !onlyDiffs;
     r.tr.classList.toggle('differs', row.differs);
     row.values.forEach((v, i) => {
-      if (fillCell(r.cells[i], v) && flash) changed.push(r.cells[i]);
+      if (fillCell(r.cells[i], v) && flash && shown) changed.push(r.cells[i]);
     });
-    return r.tr;
-  });
+    if (shown) trs.push(r.tr);
+  }
   if (trs.length === 0) {
     emptyCell.textContent = columns.some(Boolean) && onlyDiffs ? 'No differences.' : 'Waiting for messages on these topics.';
     trs.push(emptyRow);
@@ -922,8 +931,10 @@ $('c-add').addEventListener('submit', (ev) => {
     toast('error', `Could not tell which part of the compared topics is the device ${value}. Enter the full topic instead.`);
     return;
   }
-  // Several segments can pass for the device; the topic the broker has decides.
-  const name = guesses.find((n) => tree.idOf(n) >= 0) ?? guesses[0];
+  // Several segments can pass for the device; the topic the broker has
+  // decides, and one that is not compared yet wins over one that is.
+  const known = guesses.filter((n) => tree.idOf(n) >= 0);
+  const name = known.find((n) => !compareNames.includes(n)) ?? known[0] ?? guesses[0];
   if (compareNames.includes(name)) {
     toast('error', `${name} is already in the comparison.`);
     return;

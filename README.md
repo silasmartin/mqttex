@@ -55,7 +55,7 @@ To see several devices next to each other, add their topics to the comparison: s
 
 - one column per topic, titled by the part of the topic that differs (for `/topic/SN1/V0/post/json` and `/topic/SN2/V0/post/json` that is `SN1` and `SN2`), with the age of its last message
 - one row per JSON field (`a.b.c`, arrays as `a[0]`, keys with a dot or bracket quoted as `a["b.c"]`); payloads that are not JSON form a single `(payload)` row
-- strings keep their quotes and numbers the digits that were sent, so `"21"` next to `21` counts as a difference
+- strings keep their quotes, so `"21"` next to `21` counts as a difference; numbers keep the digits that were sent (`1.0`, integers beyond 2^53) in browsers that give `JSON.parse` the source text, such as Chromium-based ones, and are rounded as usual elsewhere
 - rows whose values differ are highlighted, changed values flash, missing fields show `-`
 - **Only differences** hides the rows that are equal everywhere, × removes a column, **Clear** empties the list
 
