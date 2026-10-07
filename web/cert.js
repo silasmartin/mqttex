@@ -1,14 +1,20 @@
 // CA certificate handling for the connection dialog. No DOM in here, so it
 // runs under `node --test` as well.
 
-const decoder = new TextDecoder();
+// UTF-16 with a byte order mark is what Windows PowerShell 5 writes with ">".
+// A DER certificate starts with 0x30, so it never looks like one.
+function decode(bytes) {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
+  return new TextDecoder().decode(bytes);
+}
 
 // A PEM file is passed through. Anything else is taken for a binary DER
 // certificate (.cer, .der) and wrapped as PEM, which is what the server
 // stores; if it is not a certificate either, saving says so.
 export function certFileToPEM(bytes) {
   if (bytes.length === 0) throw new Error('the file is empty');
-  const text = decoder.decode(bytes);
+  const text = decode(bytes);
   if (text.includes('-----BEGIN')) return text.trim();
   let bin = '';
   for (const b of bytes) bin += String.fromCharCode(b);

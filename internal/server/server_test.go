@@ -382,7 +382,7 @@ func TestCustomCACert(t *testing.T) {
 	if s := connect("wss", wssPort, ""); s.State == broker.StateConnected || !strings.Contains(s.Error, "add its certificate to the connection") {
 		t.Errorf("wss without ca: %+v", s)
 	}
-	if s := connect("mqtts", mqttsPort, other.PEM); s.State == broker.StateConnected || !strings.Contains(s.Error, "not signed by the CA certificate of this connection") {
+	if s := connect("mqtts", mqttsPort, other.PEM); s.State == broker.StateConnected || !strings.Contains(s.Error, "does not chain up to the CA certificate of this connection") {
 		t.Errorf("with another ca: %+v", s)
 	}
 	if s := connect("mqtts", mqttsPort, ca.PEM); s.State != broker.StateConnected {
@@ -404,7 +404,7 @@ func TestCustomCACert(t *testing.T) {
 	var list []profiles.Public
 	json.NewDecoder(res.Body).Decode(&list)
 	res.Body.Close()
-	if len(list) != 5 || len(list[3].CACerts) != 1 || list[3].CACerts[0].Subject != "Test Root CA" || list[3].CACert != strings.TrimSpace(ca.PEM) {
+	if len(list) != 5 || len(list[3].CACerts) != 1 || list[3].CACerts[0].Subject != "Test Root CA" || list[3].CACert != ca.PEM {
 		t.Fatalf("profiles = %+v", list)
 	}
 }

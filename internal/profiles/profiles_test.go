@@ -150,15 +150,15 @@ func TestCACertIsValidatedAndSummarized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.CACert != strings.TrimSpace(bundle) {
-		t.Errorf("stored ca = %q", p.CACert)
+	if p.CACert != ca.PEM+other.PEM {
+		t.Errorf("stored ca = %q, want only the certificates", p.CACert)
 	}
 	pub := p.Public()
 	if len(pub.CACerts) != 2 || pub.CACerts[0].Subject != "Test Root CA" || !pub.CACerts[0].NotAfter.Equal(expiry) || pub.CACerts[1].Subject != "Other CA" {
 		t.Fatalf("summary = %+v", pub.CACerts)
 	}
 	data, _ := json.Marshal(pub)
-	if !strings.Contains(string(data), `"caCert":"subject=CN`) || !strings.Contains(string(data), `"notAfter":"2030-01-02T03:04:05Z"`) {
+	if !strings.Contains(string(data), `"caCert":"-----BEGIN CERTIFICATE-----`) || !strings.Contains(string(data), `"notAfter":"2030-01-02T03:04:05Z"`) {
 		t.Errorf("public json = %s", data)
 	}
 
@@ -175,8 +175,12 @@ func TestCACertIsValidatedAndSummarized(t *testing.T) {
 		"not pem":     {"hello", "no PEM certificate"},
 		"der as text": {string(ca.DER), "no PEM certificate"},
 		"private key": {ca.PEM + "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n", "contains a private key"},
-		"other block": {"-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n", "-----BEGIN X509 CRL----- is not a certificate"},
-		"broken cert": {"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "CA certificate 1 cannot be read"},
+		// Not PEM blocks, so the decoder alone would skip them as surrounding text.
+		"indented key":    {ca.PEM + "  -----BEGIN PRIVATE KEY-----\n  MIGHAgEA\n  -----END PRIVATE KEY-----\n", "contains a private key"},
+		"key without end": {ca.PEM + "-----BEGIN PRIVATE KEY-----\nMIGHAgEA\n", "contains a private key"},
+		"broken key":      {ca.PEM + "-----BEGIN PRIVATE KEY-----\nMIG*AgEA\n-----END PRIVATE KEY-----\n", "contains a private key"},
+		"other block":     {"-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n", "-----BEGIN X509 CRL----- is not a certificate"},
+		"broken cert":     {"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "CA certificate 1 cannot be read"},
 	}
 	for name, c := range bad {
 		if _, err := b.Save(Profile{Protocol: "mqtts", Host: "h", Port: 8883, CACert: c.text}, false); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -185,6 +189,11 @@ func TestCACertIsValidatedAndSummarized(t *testing.T) {
 	}
 	if err := (&Profile{Protocol: "mqtts", Host: "h", Port: 8883, CACert: " \n"}).normalize(); err != nil {
 		t.Errorf("blank ca: %v", err)
+	}
+	// A plain connection keeps no CA, so the hidden field can never block saving.
+	plain, err := b.Save(Profile{Protocol: "mqtt", Host: "h", Port: 1883, CACert: "not a certificate"}, false)
+	if err != nil || plain.CACert != "" {
+		t.Errorf("plain connection: ca = %q err = %v", plain.CACert, err)
 	}
 }
 

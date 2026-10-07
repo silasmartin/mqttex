@@ -83,8 +83,12 @@ func (p Profile) TLSConfig() (*tls.Config, error) {
 
 // ParseCerts reads the certificates of a PEM text. Text around the blocks is
 // skipped, as in "openssl s_client -showcerts" output. Any other block is
-// refused, so a private key pasted by mistake is not stored.
+// refused, and so is anything that mentions a private key, even when it is
+// indented or broken and therefore not a PEM block.
 func ParseCerts(text string) ([]*x509.Certificate, error) {
+	if strings.Contains(text, "PRIVATE KEY") {
+		return nil, errors.New("CA certificate contains a private key; only the certificate belongs here, the key stays on the broker")
+	}
 	var certs []*x509.Certificate
 	rest := []byte(text)
 	for {
@@ -93,9 +97,6 @@ func ParseCerts(text string) ([]*x509.Certificate, error) {
 			break
 		}
 		rest = next
-		if strings.HasSuffix(block.Type, "PRIVATE KEY") {
-			return nil, errors.New("CA certificate contains a private key; only the certificate belongs here, the key stays on the broker")
-		}
 		if block.Type != "CERTIFICATE" {
 			return nil, fmt.Errorf("CA certificate: -----BEGIN %s----- is not a certificate", block.Type)
 		}
@@ -137,12 +138,20 @@ func (p *Profile) normalize() error {
 	if p.Name == "" {
 		p.Name = p.Host
 	}
-	p.CACert = strings.TrimSpace(p.CACert)
-	if p.CACert != "" {
-		if _, err := ParseCerts(p.CACert); err != nil {
-			return err
-		}
+	// Only the certificates are stored, not the text around them. The field is
+	// hidden for plain connections, so a CA left in it is not kept either.
+	if !p.TLS() {
+		p.CACert = ""
 	}
+	certs, err := ParseCerts(p.CACert)
+	if err != nil {
+		return err
+	}
+	var ca strings.Builder
+	for _, c := range certs {
+		ca.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
+	}
+	p.CACert = ca.String()
 	subs := p.Subscriptions[:0:0]
 	for _, s := range p.Subscriptions {
 		if s = strings.TrimSpace(s); s == "" {

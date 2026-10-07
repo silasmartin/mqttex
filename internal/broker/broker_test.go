@@ -18,7 +18,7 @@ func TestCAHint(t *testing.T) {
 	if h := caHint(untrusted, false); !strings.Contains(h, "add its certificate") {
 		t.Errorf("untrusted without ca: %q", h)
 	}
-	if h := caHint(wrap(x509.UnknownAuthorityError{}), true); !strings.Contains(h, "not signed by the CA certificate") {
+	if h := caHint(wrap(x509.UnknownAuthorityError{}), true); !strings.Contains(h, "does not chain up to the CA certificate") {
 		t.Errorf("unknown authority with ca: %q", h)
 	}
 	for name, err := range map[string]error{

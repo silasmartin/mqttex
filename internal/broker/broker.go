@@ -157,7 +157,7 @@ func caHint(err error, hasCA bool) string {
 		return ""
 	}
 	if hasCA {
-		return " (the broker certificate is not signed by the CA certificate of this connection)"
+		return " (the broker certificate does not chain up to the CA certificate of this connection: a different CA, or the broker does not send its intermediate certificate)"
 	}
 	return " (if the broker uses a private CA, add its certificate to the connection)"
 }

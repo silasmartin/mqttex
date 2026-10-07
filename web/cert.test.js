@@ -11,6 +11,20 @@ test('certFileToPEM: PEM files are kept, only trimmed', () => {
   assert.equal(certFileToPEM(bytes(bundle)), bundle.trim());
 });
 
+test('certFileToPEM: UTF-16 PEM files with a byte order mark are read as text', () => {
+  const pem = '-----BEGIN CERTIFICATE-----\r\nMIIB\r\n-----END CERTIFICATE-----\r\n';
+  const le = new Uint8Array(2 + 2 * pem.length);
+  const be = new Uint8Array(2 + 2 * pem.length);
+  le.set([0xff, 0xfe]);
+  be.set([0xfe, 0xff]);
+  for (let i = 0; i < pem.length; i++) {
+    le[2 + 2 * i] = pem.charCodeAt(i);
+    be[3 + 2 * i] = pem.charCodeAt(i);
+  }
+  assert.equal(certFileToPEM(le), pem.trim());
+  assert.equal(certFileToPEM(be), pem.trim());
+});
+
 test('certFileToPEM: DER is wrapped in 64-character lines', () => {
   const der = new Uint8Array(100).map((_, i) => (i * 37 + 0x30) & 0xff); // starts like ASN.1, not text
   const pem = certFileToPEM(der);
