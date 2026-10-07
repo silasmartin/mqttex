@@ -171,6 +171,17 @@
           <p id="pf-subs-warning" class="hint warn" hidden></p>
         </div>
 
+        <label for="pf-ca" data-tls>CA certificate</label>
+        <div data-tls>
+          <textarea id="pf-ca" class="mono" rows="3" wrap="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----" aria-describedby="pf-ca-hint"></textarea>
+          <div class="ca-row">
+            <button id="pf-ca-load" class="btn small" type="button">Load file</button>
+            <input id="pf-ca-file" type="file" accept=".pem,.crt,.cer,.der" hidden>
+            <span id="pf-ca-info" class="hint" role="status"></span>
+          </div>
+          <p id="pf-ca-hint" class="hint">For a broker with a private CA: the CA certificate (PEM or DER), or the broker's own self-signed one. When set, this connection trusts only these, not the system CAs.</p>
+        </div>
+
         <span></span>
         <label class="check" data-tls><input id="pf-insecure" type="checkbox"> Skip TLS certificate verification</label>
       </div>

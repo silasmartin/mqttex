@@ -1,11 +1,15 @@
 package profiles
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/silasmartin/mqttex/internal/testcert"
 )
 
 func TestValidateFilter(t *testing.T) {
@@ -131,5 +135,100 @@ func TestPublicNeverContainsThePassword(t *testing.T) {
 	}
 	if strings.Contains(string(data), "hunter2") || !strings.Contains(string(data), `"hasPassword":true`) {
 		t.Fatalf("public json = %s", data)
+	}
+}
+
+func TestCACertIsValidatedAndSummarized(t *testing.T) {
+	expiry := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	ca := testcert.NewCA(t, "Test Root CA", expiry)
+	other := testcert.NewCA(t, "Other CA", expiry)
+	b, _ := Open(filepath.Join(t.TempDir(), "p.json"))
+
+	// Text around the blocks, as openssl prints it, is fine.
+	bundle := "subject=CN = Test Root CA\n" + ca.PEM + "---\n" + other.PEM + "\nServer certificate ends here\n"
+	p, err := b.Save(Profile{Protocol: "mqtts", Host: "h", Port: 8883, CACert: "  " + bundle + "\n\n"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CACert != ca.PEM+other.PEM {
+		t.Errorf("stored ca = %q, want only the certificates", p.CACert)
+	}
+	pub := p.Public()
+	if len(pub.CACerts) != 2 || pub.CACerts[0].Subject != "Test Root CA" || !pub.CACerts[0].NotAfter.Equal(expiry) || pub.CACerts[1].Subject != "Other CA" {
+		t.Fatalf("summary = %+v", pub.CACerts)
+	}
+	data, _ := json.Marshal(pub)
+	if !strings.Contains(string(data), `"caCert":"-----BEGIN CERTIFICATE-----`) || !strings.Contains(string(data), `"notAfter":"2030-01-02T03:04:05Z"`) {
+		t.Errorf("public json = %s", data)
+	}
+
+	// Unlike the password, an empty field removes the stored certificate.
+	p.CACert = ""
+	if _, err := b.Save(p, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.Get(p.ID); got.CACert != "" || got.Public().CACerts != nil {
+		t.Errorf("ca was not removed: %+v", got)
+	}
+
+	bad := map[string]struct{ text, want string }{
+		"not pem":     {"hello", "no PEM certificate"},
+		"der as text": {string(ca.DER), "no PEM certificate"},
+		"private key": {ca.PEM + "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n", "contains a private key"},
+		// Not PEM blocks, so the decoder alone would skip them as surrounding text.
+		"indented key":    {ca.PEM + "  -----BEGIN PRIVATE KEY-----\n  MIGHAgEA\n  -----END PRIVATE KEY-----\n", "contains a private key"},
+		"key without end": {ca.PEM + "-----BEGIN PRIVATE KEY-----\nMIGHAgEA\n", "contains a private key"},
+		"broken key":      {ca.PEM + "-----BEGIN PRIVATE KEY-----\nMIG*AgEA\n-----END PRIVATE KEY-----\n", "contains a private key"},
+		"other block":     {"-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n", "-----BEGIN X509 CRL----- is not a certificate"},
+		"broken cert":     {"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "CA certificate 1 cannot be read"},
+	}
+	for name, c := range bad {
+		if _, err := b.Save(Profile{Protocol: "mqtts", Host: "h", Port: 8883, CACert: c.text}, false); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
+	if err := (&Profile{Protocol: "mqtts", Host: "h", Port: 8883, CACert: " \n"}).normalize(); err != nil {
+		t.Errorf("blank ca: %v", err)
+	}
+	// A plain connection keeps no CA, so the hidden field can never block saving.
+	plain, err := b.Save(Profile{Protocol: "mqtt", Host: "h", Port: 1883, CACert: "not a certificate"}, false)
+	if err != nil || plain.CACert != "" {
+		t.Errorf("plain connection: ca = %q err = %v", plain.CACert, err)
+	}
+}
+
+func TestTLSConfigTrustsOnlyTheCACert(t *testing.T) {
+	ca := testcert.NewCA(t, "Test Root CA", time.Now().Add(time.Hour))
+	leaf, err := x509.ParseCertificate(ca.ServerTLS(t).Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, proto := range []string{"mqtt", "ws"} {
+		if cfg, err := (Profile{Protocol: proto, CACert: ca.PEM}).TLSConfig(); cfg != nil || err != nil {
+			t.Errorf("%s: cfg = %v err = %v, want no TLS", proto, cfg, err)
+		}
+	}
+
+	system, err := (Profile{Protocol: "wss", TLSInsecure: true}).TLSConfig()
+	if err != nil || system == nil || system.RootCAs != nil || !system.InsecureSkipVerify {
+		t.Fatalf("without ca: %+v %v", system, err)
+	}
+
+	cfg, err := (Profile{Protocol: "mqtts", CACert: ca.PEM}).TLSConfig()
+	if err != nil || cfg.RootCAs == nil || cfg.InsecureSkipVerify {
+		t.Fatalf("with ca: %+v %v", cfg, err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cfg.RootCAs}); err != nil {
+		t.Errorf("a certificate signed by the CA is not trusted: %v", err)
+	}
+	other := testcert.NewCA(t, "Other CA", time.Now().Add(time.Hour))
+	cfg, _ = (Profile{Protocol: "mqtts", CACert: other.PEM}).TLSConfig()
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cfg.RootCAs}); err == nil {
+		t.Error("a certificate from another CA is trusted")
+	}
+
+	if _, err := (Profile{Protocol: "mqtts", CACert: "hello"}).TLSConfig(); err == nil {
+		t.Error("a broken stored CA certificate must fail")
 	}
 }

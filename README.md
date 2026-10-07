@@ -13,7 +13,7 @@ One Go binary, no database, UI in your browser.
 - Per-topic view: latest value (JSON is pretty-printed), message history with millisecond timestamps and the interval between messages, so you can see at a glance whether a device is still pushing
 - Compare several topics side by side: one column per device, one row per JSON field, live values, differences highlighted
 - Publish with QoS and retain, and clear retained messages
-- Saved connection profiles: mqtt, mqtts, ws, wss, username/password, several subscriptions
+- Saved connection profiles: mqtt, mqtts, ws, wss, username/password, a custom CA certificate per connection, several subscriptions
 - Connection problems are shown with their cause: refused connections, failed authentication and subscriptions the broker rejected (for example because of an ACL)
 - Keyboard navigation in the tree, light and dark mode
 
@@ -48,6 +48,10 @@ Subscriptions are MQTT topic filters: `#` matches all remaining levels, `+` matc
 | `-max-topics` | `2000000` | stop adding topics beyond this number |
 | `-no-open` | | do not open the browser on start |
 | `-web` | | serve the UI from a directory instead of the embedded copy (development) |
+
+### Brokers with a private CA
+
+If the broker's certificate is not signed by a CA your system trusts, paste the CA certificate into **CA certificate** in the connection (or press **Load file**; PEM and DER files work, so do bundles with several certificates). A self-signed broker certificate can be given directly. With a CA certificate set, that connection trusts only these certificates and no longer the system CAs, like `mosquitto_sub --cafile`. The certificate is checked when you save and shown with its name and expiry date; private keys are refused. When the broker's certificate is not trusted, the connection error says whether a CA certificate is missing or does not match.
 
 ## Compare devices
 
@@ -85,7 +89,7 @@ History is recorded for a topic while it is open (last 500 messages). All other 
 
 - mqttex has no login. It binds to loopback by default; if you pass a non-loopback `-addr`, everyone who can reach the port can use your saved broker credentials.
 - Cross-origin requests, WebSocket connections from other origins and requests with a foreign `Host` header are refused, so another website open in your browser cannot drive the API.
-- Profiles, including passwords, are stored as plain text in the profiles file with mode `0600`. The API never returns a stored password.
+- Profiles, including passwords and CA certificates, are stored as plain text in the profiles file with mode `0600`. The API never returns a stored password.
 
 ## Development
 

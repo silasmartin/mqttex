@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -63,6 +64,10 @@ func (m *Manager) Connect(p profiles.Profile) error {
 	if err != nil {
 		return fmt.Errorf("broker address %q is invalid: %w", p.URL(), err)
 	}
+	tlsCfg, err := p.TLSConfig()
+	if err != nil {
+		return err
+	}
 	m.Disconnect()
 	m.store.Reset()
 
@@ -107,7 +112,8 @@ func (m *Manager) Connect(p profiles.Profile) error {
 			return true
 		},
 		OnConnectError: func(err error) {
-			update(func(s *Status) { s.State, s.Error = StateConnecting, err.Error() })
+			msg := err.Error() + caHint(err, p.CACert != "")
+			update(func(s *Status) { s.State, s.Error = StateConnecting, msg })
 		},
 		ClientConfig: paho.ClientConfig{
 			ClientID: clientID,
@@ -126,9 +132,7 @@ func (m *Manager) Connect(p profiles.Profile) error {
 			},
 		},
 	}
-	if p.Protocol == "mqtts" || p.Protocol == "wss" {
-		cfg.TlsCfg = &tls.Config{InsecureSkipVerify: p.TLSInsecure}
-	}
+	cfg.TlsCfg = tlsCfg
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cm, err := autopaho.NewConnection(ctx, cfg)
@@ -139,6 +143,23 @@ func (m *Manager) Connect(p profiles.Profile) error {
 	}
 	m.cm, m.cancel = cm, cancel
 	return nil
+}
+
+// caHint points at the CA certificate when the broker's certificate chain is
+// not trusted. Expired certificates and wrong host names have other causes.
+// The type is not enough on its own: the macOS system verifier reports most
+// untrusted chains as a plain error, not as x509.UnknownAuthorityError.
+func caHint(err error, hasCA bool) string {
+	var verify *tls.CertificateVerificationError
+	var host x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	if !errors.As(err, &verify) || errors.As(err, &host) || errors.As(err, &invalid) {
+		return ""
+	}
+	if hasCA {
+		return " (the broker certificate does not chain up to the CA certificate of this connection: a different CA, or the broker does not send its intermediate certificate)"
+	}
+	return " (if the broker uses a private CA, add its certificate to the connection)"
 }
 
 func (m *Manager) ingest(p *paho.Publish) {
