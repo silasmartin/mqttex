@@ -3,14 +3,18 @@ package profiles
 
 import (
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Profile struct {
@@ -24,19 +28,87 @@ type Profile struct {
 	Password      string   `json:"password,omitempty"`
 	ClientID      string   `json:"clientId,omitempty"`
 	TLSInsecure   bool     `json:"tlsInsecure,omitempty"`
+	CACert        string   `json:"caCert,omitempty"` // PEM; trusted instead of the system roots for mqtts and wss
 	Subscriptions []string `json:"subscriptions"`
 }
 
 // Public is a profile as handed to the browser: the password never leaves the server.
 type Public struct {
 	Profile
-	HasPassword bool `json:"hasPassword"`
+	HasPassword bool       `json:"hasPassword"`
+	CACerts     []CertInfo `json:"caCerts,omitempty"`
+}
+
+// CertInfo describes a certificate in words a person can check.
+type CertInfo struct {
+	Subject  string    `json:"subject"`
+	NotAfter time.Time `json:"notAfter"`
 }
 
 func (p Profile) Public() Public {
 	pub := Public{Profile: p, HasPassword: p.Password != ""}
 	pub.Password = ""
+	certs, _ := ParseCerts(p.CACert) // validated on save
+	for _, c := range certs {
+		subject := c.Subject.CommonName
+		if subject == "" {
+			subject = c.Subject.String()
+		}
+		pub.CACerts = append(pub.CACerts, CertInfo{Subject: subject, NotAfter: c.NotAfter})
+	}
 	return pub
+}
+
+func (p Profile) TLS() bool { return p.Protocol == "mqtts" || p.Protocol == "wss" }
+
+// TLSConfig is nil for plain connections. With a CA certificate only that CA
+// is trusted, like mosquitto's --cafile; without one the system roots are.
+func (p Profile) TLSConfig() (*tls.Config, error) {
+	if !p.TLS() {
+		return nil, nil
+	}
+	cfg := &tls.Config{InsecureSkipVerify: p.TLSInsecure}
+	if p.CACert != "" {
+		certs, err := ParseCerts(p.CACert)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = x509.NewCertPool()
+		for _, c := range certs {
+			cfg.RootCAs.AddCert(c)
+		}
+	}
+	return cfg, nil
+}
+
+// ParseCerts reads the certificates of a PEM text. Text around the blocks is
+// skipped, as in "openssl s_client -showcerts" output. Any other block is
+// refused, so a private key pasted by mistake is not stored.
+func ParseCerts(text string) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
+	rest := []byte(text)
+	for {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if strings.HasSuffix(block.Type, "PRIVATE KEY") {
+			return nil, errors.New("CA certificate contains a private key; only the certificate belongs here, the key stays on the broker")
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("CA certificate: -----BEGIN %s----- is not a certificate", block.Type)
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("CA certificate %d cannot be read: %w", len(certs)+1, err)
+		}
+		certs = append(certs, c)
+	}
+	if len(certs) == 0 && strings.TrimSpace(text) != "" {
+		return nil, errors.New("CA certificate contains no PEM certificate; it has to start with -----BEGIN CERTIFICATE-----")
+	}
+	return certs, nil
 }
 
 // URL is the broker address in the form autopaho expects.
@@ -64,6 +136,12 @@ func (p *Profile) normalize() error {
 	}
 	if p.Name == "" {
 		p.Name = p.Host
+	}
+	p.CACert = strings.TrimSpace(p.CACert)
+	if p.CACert != "" {
+		if _, err := ParseCerts(p.CACert); err != nil {
+			return err
+		}
 	}
 	subs := p.Subscriptions[:0:0]
 	for _, s := range p.Subscriptions {

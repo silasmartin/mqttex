@@ -1,6 +1,7 @@
 import { TopicTree, filterPaste } from './tree.js';
 import { flatten, digest, columnLabels, buildRows, deviceTopics, pickTopic, rowLimit } from './compare.js';
 import { formatBytes, formatInterval } from './format.js';
+import { certFileToPEM, describeCerts } from './cert.js';
 
 const ROW_H = 24;
 const OVERSCAN = 6;
@@ -1068,6 +1069,31 @@ function checkSubscriptions() {
     : '';
 }
 
+// The summary describes the saved certificates, so it goes once they are edited.
+function showCAInfo(text, warn = false) {
+  $('pf-ca-info').textContent = text;
+  $('pf-ca-info').classList.toggle('warn', warn);
+}
+
+function showSavedCAs(certs) {
+  const lines = describeCerts(certs, Date.now(), (d) => dateFmt.format(d));
+  showCAInfo(lines.map((l) => l.text).join('; '), lines.some((l) => l.expired));
+}
+
+const MAX_CA_FILE = 1 << 20;
+
+async function loadCAFile(file) {
+  try {
+    if (file.size > MAX_CA_FILE) throw new Error(`it has ${formatBytes(file.size)}, a certificate file has a few KB`);
+    $('pf-ca').value = certFileToPEM(new Uint8Array(await file.arrayBuffer()));
+    showCAInfo(`Loaded ${file.name}, checked when you save.`);
+    $('pf-error').hidden = true;
+  } catch (err) {
+    $('pf-error').hidden = false;
+    $('pf-error').textContent = `Could not load the CA certificate ${file.name}: ${err.message}`;
+  }
+}
+
 let disarmDelete = () => {};
 
 function openDialog(p) {
@@ -1083,6 +1109,8 @@ function openDialog(p) {
   $('pf-password').placeholder = p?.hasPassword ? 'unchanged' : '';
   $('pf-clientid').value = p?.clientId ?? '';
   $('pf-insecure').checked = p?.tlsInsecure ?? false;
+  $('pf-ca').value = p?.caCert ?? '';
+  showSavedCAs(p?.caCerts);
   $('pf-subs').value = (p?.subscriptions ?? ['#']).join('\n');
   $('pf-delete').hidden = !p;
   $('pf-error').hidden = true;
@@ -1094,6 +1122,13 @@ function openDialog(p) {
 
 $('pf-protocol').addEventListener('change', syncProtocolFields);
 $('pf-subs').addEventListener('input', checkSubscriptions);
+$('pf-ca').addEventListener('input', () => showCAInfo(''));
+$('pf-ca-load').addEventListener('click', () => $('pf-ca-file').click());
+$('pf-ca-file').addEventListener('change', async () => {
+  const file = $('pf-ca-file').files[0];
+  if (file) await loadCAFile(file);
+  $('pf-ca-file').value = ''; // picking the same file again fires change again
+});
 $('new').addEventListener('click', () => openDialog(null));
 $('edit').addEventListener('click', () => openDialog(profiles.find((p) => p.id === $('profile').value) ?? null));
 $('pf-cancel').addEventListener('click', () => dialog.close());
@@ -1113,6 +1148,7 @@ $('profile-form').addEventListener('submit', async (ev) => {
     clearPassword: username === '',
     clientId: $('pf-clientid').value.trim(),
     tlsInsecure: $('pf-insecure').checked,
+    caCert: $('pf-ca').value,
     subscriptions: $('pf-subs').value.split('\n'),
   };
   try {

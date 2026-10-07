@@ -23,6 +23,7 @@ import (
 	"github.com/silasmartin/mqttex/internal/broker"
 	"github.com/silasmartin/mqttex/internal/profiles"
 	"github.com/silasmartin/mqttex/internal/store"
+	"github.com/silasmartin/mqttex/internal/testcert"
 )
 
 // aclHook lets everybody in but refuses any topic below denied/.
@@ -37,15 +38,19 @@ func (h *aclHook) OnACLCheck(_ *mqtt.Client, topic string, _ bool) bool {
 	return !strings.HasPrefix(topic, "denied/")
 }
 
-func startBroker(t *testing.T) (*mqtt.Server, int) {
+func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
 
+func startBroker(t *testing.T) (*mqtt.Server, int) {
+	t.Helper()
+	port := freePort(t)
 	srv := mqtt.New(&mqtt.Options{InlineClient: true})
 	if err := srv.AddHook(new(aclHook), nil); err != nil {
 		t.Fatal(err)
@@ -324,6 +329,83 @@ func TestEndToEndBrokerToBrowser(t *testing.T) {
 	e.do("POST", "/api/disconnect", nil, nil)
 	if code, body := e.do("POST", "/api/publish", req, nil); code != 400 || !strings.Contains(fmt.Sprint(body["error"]), "not connected") {
 		t.Fatalf("publish while disconnected = %d %v", code, body)
+	}
+}
+
+// startTLSBroker serves MQTT over TLS and WebSocket over TLS with a
+// certificate for 127.0.0.1 signed by ca.
+func startTLSBroker(t *testing.T, ca *testcert.CA) (mqttsPort, wssPort int) {
+	t.Helper()
+	mqttsPort, wssPort = freePort(t), freePort(t)
+	srv := mqtt.New(&mqtt.Options{InlineClient: true})
+	if err := srv.AddHook(new(aclHook), nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ca.ServerTLS(t)
+	if err := srv.AddListener(listeners.NewTCP(listeners.Config{ID: "tls", Address: fmt.Sprintf("127.0.0.1:%d", mqttsPort), TLSConfig: cfg})); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.AddListener(listeners.NewWebsocket(listeners.Config{ID: "wss", Address: fmt.Sprintf("127.0.0.1:%d", wssPort), TLSConfig: cfg})); err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+	return mqttsPort, wssPort
+}
+
+func TestCustomCACert(t *testing.T) {
+	ca := testcert.NewCA(t, "Test Root CA", time.Now().Add(time.Hour))
+	other := testcert.NewCA(t, "Other CA", time.Now().Add(time.Hour))
+	mqttsPort, wssPort := startTLSBroker(t, ca)
+	e := newEnv(t)
+
+	connect := func(protocol string, port int, caCert string) broker.Status {
+		t.Helper()
+		code, saved := e.do("POST", "/api/profiles", map[string]any{"protocol": protocol, "host": "127.0.0.1", "port": port, "caCert": caCert}, nil)
+		if code != 200 {
+			t.Fatalf("save = %d %v", code, saved)
+		}
+		if code, body := e.do("POST", "/api/connect", map[string]any{"id": saved["id"]}, nil); code != 200 {
+			t.Fatalf("connect = %d %v", code, body)
+		}
+		e.waitFor(protocol+" connection result", func() bool {
+			s := e.br.Status()
+			return s.State == broker.StateConnected || s.Error != ""
+		})
+		return e.br.Status()
+	}
+
+	// The test CA is not among the system roots.
+	if s := connect("mqtts", mqttsPort, ""); s.State == broker.StateConnected || !strings.Contains(s.Error, "add its certificate to the connection") {
+		t.Errorf("without ca: %+v", s)
+	}
+	if s := connect("wss", wssPort, ""); s.State == broker.StateConnected || !strings.Contains(s.Error, "add its certificate to the connection") {
+		t.Errorf("wss without ca: %+v", s)
+	}
+	if s := connect("mqtts", mqttsPort, other.PEM); s.State == broker.StateConnected || !strings.Contains(s.Error, "not signed by the CA certificate of this connection") {
+		t.Errorf("with another ca: %+v", s)
+	}
+	if s := connect("mqtts", mqttsPort, ca.PEM); s.State != broker.StateConnected {
+		t.Errorf("mqtts with the ca: %+v", s)
+	}
+	if s := connect("wss", wssPort, ca.PEM); s.State != broker.StateConnected {
+		t.Errorf("wss with the ca: %+v", s)
+	}
+
+	code, body := e.do("POST", "/api/profiles", map[string]any{"protocol": "mqtts", "host": "h", "port": 8883, "caCert": "not a certificate"}, nil)
+	if code != 400 || !strings.Contains(fmt.Sprint(body["error"]), "CA certificate") {
+		t.Errorf("save with a broken ca = %d %v", code, body)
+	}
+
+	res, err := e.client.Get(e.http.URL + "/api/profiles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []profiles.Public
+	json.NewDecoder(res.Body).Decode(&list)
+	res.Body.Close()
+	if len(list) != 5 || len(list[3].CACerts) != 1 || list[3].CACerts[0].Subject != "Test Root CA" || list[3].CACert != strings.TrimSpace(ca.PEM) {
+		t.Fatalf("profiles = %+v", list)
 	}
 }
 
